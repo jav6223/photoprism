@@ -259,7 +259,7 @@ func TestConfig_DatabasePortString(t *testing.T) {
 func TestConfig_DatabaseName(t *testing.T) {
 	c := NewConfig(CliTestContext())
 	resetDatabaseOptions(c)
-	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseName())
+	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", c.DatabaseName())
 }
 
 func TestConfig_DatabaseUser(t *testing.T) {
@@ -340,13 +340,13 @@ func TestConfig_DatabaseDSN(t *testing.T) {
 	c.options.DatabaseDriver = "MariaDB"
 	assert.Equal(t, "photoprism:@tcp(localhost)/photoprism?charset=utf8mb4,utf8&collation=utf8mb4_unicode_ci&parseTime=true&timeout=15s", c.DatabaseDSN())
 	c.options.DatabaseDriver = "tidb"
-	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
+	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", c.DatabaseDSN())
 	c.options.DatabaseDriver = "Postgres"
 	assert.Equal(t, "user=photoprism password= dbname=photoprism host=localhost port=5432 connect_timeout=15 sslmode=disable TimeZone=UTC", c.DatabaseDSN())
 	c.options.DatabaseDriver = "SQLite"
-	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
+	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", c.DatabaseDSN())
 	c.options.DatabaseDriver = ""
-	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
+	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL", c.DatabaseDSN())
 
 	t.Run("CustomServer", func(t *testing.T) {
 		conf := NewConfig(CliTestContext())
@@ -417,6 +417,21 @@ func TestConfig_DatabaseDSN(t *testing.T) {
 		assert.Equal(t, "postgres.internal", conf.DatabaseHost())
 		assert.Equal(t, 5433, conf.DatabasePort())
 	})
+	t.Run("SQLiteSQLiteAlias", func(t *testing.T) {
+		conf := NewConfig(CliTestContext())
+		resetDatabaseOptions(conf)
+
+		conf.options.DatabaseDriver = dsn.DriverSQLite3
+		conf.options.DatabaseDSN = "sqlite:/var/photoprism/instance.db"
+
+		want := "file:/var/photoprism/instance.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL"
+		if got := conf.DatabaseDSN(); got != want {
+			t.Fatalf("DatabaseDSN() = %q, want %q", got, want)
+		}
+
+		assert.Equal(t, "", conf.DatabaseHost())
+		assert.Equal(t, 0, conf.DatabasePort())
+	})
 }
 
 func TestConfig_DatabaseDSNFlags(t *testing.T) {
@@ -458,13 +473,252 @@ func TestConfig_ReportDatabaseDSN(t *testing.T) {
 
 func TestConfig_DatabaseFile(t *testing.T) {
 	c := NewConfig(CliTestContext())
-	// Ensure SQLite defaults
-	resetDatabaseOptions(c)
-	driver := c.DatabaseDriver()
-	assert.Equal(t, dsn.DriverSQLite3, driver)
-	c.options.DatabaseDSN = ""
-	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db", c.DatabaseFile())
-	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
+
+	tests := []struct {
+		name       string
+		inDriver   string
+		inDSN      string
+		wantDriver string
+		wantFile   string
+		wantDSN    string
+	}{
+		{
+			// Ensure SQLite defaults
+			name:       "DefaultSQLite",
+			inDriver:   "",
+			inDSN:      "",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   ProjectRoot + "/storage/testdata/index.db",
+			wantDSN:    ProjectRoot + "/storage/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseNoPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "index.db",
+			wantDSN:    "index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseRelativePath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "testdata/index.db",
+			wantDSN:    "testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseRootPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/index.db",
+			wantDSN:    "/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBasePath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/testdata/index.db",
+			wantDSN:    "/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "./testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "testdata/index.db",
+			wantDSN:    "./testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseDoubleDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "../testdata/index.db",
+			wantDSN:    "../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseTripleDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      ".../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   ".../testdata/index.db",
+			wantDSN:    ".../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteFileNoPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "file:index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "index.db",
+			wantDSN:    "file:index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteFileRelativePath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "file:testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "testdata/index.db",
+			wantDSN:    "file:testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteFileRootPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "file:/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/index.db",
+			wantDSN:    "file:/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteFilePath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "file:/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/testdata/index.db",
+			wantDSN:    "file:/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteFileDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "file:./testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "testdata/index.db",
+			wantDSN:    "file:./testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteFileDoubleDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "file:../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "../testdata/index.db",
+			wantDSN:    "file:../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteFileTripleDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "file:.../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   ".../testdata/index.db",
+			wantDSN:    "file:.../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteSQLiteNoPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "sqlite:index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "index.db",
+			wantDSN:    "file:index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteSQLiteRelativePath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "sqlite:testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "testdata/index.db",
+			wantDSN:    "file:testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteSQLiteRootPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "sqlite:/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/index.db",
+			wantDSN:    "file:/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteSQLitePath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "sqlite:/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/testdata/index.db",
+			wantDSN:    "file:/testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteSQLiteDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "sqlite:./testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "testdata/index.db",
+			wantDSN:    "file:./testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteSQLiteDoubleDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "sqlite:../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "../testdata/index.db",
+			wantDSN:    "file:../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteSQLiteTripleDotPath",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "sqlite:.../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   ".../testdata/index.db",
+			wantDSN:    "file:.../testdata/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseAtPattern",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "/photoprism/my@storage/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/photoprism/my@storage/index.db",
+			wantDSN:    "/photoprism/my@storage/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseBacketPattern",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "/srv/photos (main)/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "/srv/photos (main)/index.db",
+			wantDSN:    "/srv/photos (main)/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseMySQLStyle",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "photoprism:storage@file(storage:port)/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "photoprism:storage@file(storage:port)/index.db",
+			wantDSN:    "photoprism:storage@file(storage:port)/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "SQLiteBaseMySQLPipe",
+			inDriver:   dsn.DriverSQLite3,
+			inDSN:      "photoprism:storage@pipe(storage:port)/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+			wantDriver: dsn.DriverSQLite3,
+			wantFile:   "photoprism:storage@pipe(storage:port)/index.db",
+			wantDSN:    "photoprism:storage@pipe(storage:port)/index.db?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL",
+		},
+		{
+			name:       "MySQLBlank",
+			inDriver:   dsn.DriverMySQL,
+			inDSN:      "",
+			wantDriver: dsn.DriverMySQL,
+			wantFile:   "",
+			wantDSN:    "photoprism:@tcp(localhost)/photoprism?charset=utf8mb4,utf8&collation=utf8mb4_unicode_ci&parseTime=true&timeout=15s",
+		},
+		{
+			name:       "MySQLURI",
+			inDriver:   dsn.DriverMySQL,
+			inDSN:      "mysql://user@localhost:3306/photoprism?parseTime=true",
+			wantDriver: dsn.DriverMySQL,
+			wantFile:   "",
+			wantDSN:    "mysql://user@localhost:3306/photoprism?parseTime=true",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetDatabaseOptions(c)
+			c.options.DatabaseDriver = tt.inDriver
+			c.options.DatabaseDSN = tt.inDSN
+			driver := c.DatabaseDriver()
+			assert.Equal(t, tt.wantDriver, driver)
+			assert.Equal(t, tt.wantFile, c.DatabaseFile())
+			assert.Equal(t, tt.wantDSN, c.DatabaseDSN())
+		})
+	}
 }
 
 func TestConfig_DatabaseTimeout(t *testing.T) {

@@ -176,6 +176,18 @@ func (c *Config) DatabaseDSN() string {
 			c.DatabaseTimeout())
 	}
 
+	// If missing, add the required parameters to the configured SQLite DSN.
+	if c.DatabaseDriver() == dsn.DriverSQLite3 && !strings.Contains(c.options.DatabaseDSN, "?") {
+		c.options.DatabaseDSN = fmt.Sprintf(
+			"%s?%s",
+			c.options.DatabaseDSN,
+			dsn.Params[dsn.DriverSQLite3])
+	}
+	// If sqlite: alias, replace with file: for SQLite driver's DSN
+	if c.DatabaseDriver() == dsn.DriverSQLite3 && strings.HasPrefix(strings.ToLower(c.options.DatabaseDSN), "sqlite:") {
+		c.options.DatabaseDSN = "file:" + c.options.DatabaseDSN[7:]
+	}
+
 	return c.options.DatabaseDSN
 }
 
@@ -219,8 +231,7 @@ func (c *Config) ParseDatabaseDSN() {
 
 // DatabaseFile returns the filename part of a sqlite database DSN.
 func (c *Config) DatabaseFile() string {
-	fileName, _, _ := strings.Cut(strings.TrimPrefix(c.DatabaseDSN(), "file:"), "?")
-	return fileName
+	return dsn.Parse(c.DatabaseDSN()).SQLiteFilename()
 }
 
 // DatabaseServer the database server.
@@ -451,6 +462,11 @@ func (c *Config) CloseDb() error {
 	}
 
 	if c.db != nil {
+		if c.DatabaseDriver() == dsn.DriverSQLite3 {
+			if err := c.db.Exec("PRAGMA wal_checkpoint(FULL)").Error; err != nil {
+				log.Warnf("config: could not initiate wal_checkpoint (%v)", err)
+			}
+		}
 		if err := c.db.Close(); err == nil {
 			c.db = nil
 			entity.SetDbProvider(nil)
