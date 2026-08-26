@@ -6,6 +6,7 @@ import (
 
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/form"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
@@ -16,6 +17,7 @@ func Faces(frm form.SearchFaces) (results FaceResults, err error) {
 	}
 
 	facesTable := entity.Face{}.TableName()
+	results = make(FaceResults, 0)
 
 	// Base query.
 	s := UnscopedDb().Table(facesTable)
@@ -24,30 +26,61 @@ func Faces(frm form.SearchFaces) (results FaceResults, err error) {
 		s = s.Select(fmt.Sprintf(`%s.*, m.marker_uid, m.file_uid, m.marker_name, m.subj_src, m.marker_src, 
 			m.marker_type, m.marker_review, m.marker_invalid, m.size, m.score, m.thumb, m.face_dist`, facesTable))
 
-		if txt.Yes(frm.Unknown) {
-			s = s.Joins(`JOIN (
-	        SELECT face_id, MIN(marker_uid) AS marker_uid FROM markers
-	        WHERE face_id <> '' AND subj_uid = '' AND marker_name = '' AND marker_type = 'face'
-	          AND marker_invalid = 0 AND face_dist <= 0.64 AND size >= 80 AND score >= 15
-	        GROUP BY face_id) fm
-	        ON faces.id = fm.face_id`)
-		} else if txt.No(frm.Unknown) {
-			s = s.Joins(`JOIN (
-	        SELECT face_id, MIN(marker_uid) AS marker_uid FROM markers
-	        WHERE face_id <> '' AND subj_uid <> '' AND marker_name <> '' AND marker_type = 'face'
-	          AND marker_invalid = 0 AND face_dist <= 0.64 AND size >= 80 AND score >= 15
-	        GROUP BY face_id) fm
-	        ON faces.id = fm.face_id`)
-		} else {
-			s = s.Joins(`JOIN (
-	        SELECT face_id, MIN(marker_uid) AS marker_uid FROM markers
-	        WHERE face_id <> '' AND marker_type = 'face' AND marker_invalid = 0
-              AND face_dist <= 0.64 AND size >= 80 AND score >= 15
-	        GROUP BY face_id) fm
-	        ON faces.id = fm.face_id`)
-		}
+		switch entity.DbDialect() {
+		case dsn.DialectPostgreSQL:
+			if txt.Yes(frm.Unknown) {
+				s = s.Joins(`JOIN (
+					SELECT face_id, MIN(convert_from(marker_uid, 'UTF8')) AS marker_uid FROM markers
+					WHERE face_id <> '' AND subj_uid = '' AND marker_name = '' AND marker_type = 'face'
+					  AND marker_invalid = FALSE AND face_dist <= 0.64 AND size >= 80 AND score >= 15
+					GROUP BY face_id) fm
+					ON faces.id = fm.face_id`)
+			} else if txt.No(frm.Unknown) {
+				s = s.Joins(`JOIN (
+					SELECT face_id, MIN(convert_from(marker_uid, 'UTF8')) AS marker_uid FROM markers
+					WHERE face_id <> '' AND subj_uid <> '' AND marker_name <> '' AND marker_type = 'face'
+					  AND marker_invalid = FALSE AND face_dist <= 0.64 AND size >= 80 AND score >= 15
+					GROUP BY face_id) fm
+					ON faces.id = fm.face_id`)
+			} else {
+				s = s.Joins(`JOIN (
+					SELECT face_id, MIN(convert_from(marker_uid, 'UTF8')) AS marker_uid FROM markers
+					WHERE face_id <> '' AND marker_type = 'face' AND marker_invalid = FALSE 
+					  AND face_dist <= 0.64 AND size >= 80 AND score >= 15
+					GROUP BY face_id) fm
+					ON faces.id = fm.face_id`)
+			}
 
-		s = s.Joins("JOIN markers m ON m.marker_uid = fm.marker_uid")
+			s = s.Joins("JOIN markers m ON m.marker_uid = convert_to(fm.marker_uid, 'UTF8')")
+		case dsn.DialectMySQL, dsn.DialectSQLite:
+			if txt.Yes(frm.Unknown) {
+				s = s.Joins(`JOIN (
+					SELECT face_id, MIN(marker_uid) AS marker_uid FROM markers
+					WHERE face_id <> '' AND subj_uid = '' AND marker_name = '' AND marker_type = 'face'
+					  AND marker_invalid = FALSE AND face_dist <= 0.64 AND size >= 80 AND score >= 15
+					GROUP BY face_id) fm
+					ON faces.id = fm.face_id`)
+			} else if txt.No(frm.Unknown) {
+				s = s.Joins(`JOIN (
+					SELECT face_id, MIN(marker_uid) AS marker_uid FROM markers
+					WHERE face_id <> '' AND subj_uid <> '' AND marker_name <> '' AND marker_type = 'face'
+					  AND marker_invalid = FALSE AND face_dist <= 0.64 AND size >= 80 AND score >= 15
+					GROUP BY face_id) fm
+					ON faces.id = fm.face_id`)
+			} else {
+				s = s.Joins(`JOIN (
+					SELECT face_id, MIN(marker_uid) AS marker_uid FROM markers
+					WHERE face_id <> '' AND marker_type = 'face' AND marker_invalid = FALSE 
+					  AND face_dist <= 0.64 AND size >= 80 AND score >= 15
+					GROUP BY face_id) fm
+					ON faces.id = fm.face_id`)
+			}
+
+			s = s.Joins("JOIN markers m ON m.marker_uid = fm.marker_uid")
+		default:
+			err = fmt.Errorf("dialect %s not handled", entity.DbDialect())
+			return nil, err
+		}
 	} else {
 		s = s.Select(fmt.Sprintf(`%s.*`, facesTable))
 	}
@@ -91,7 +124,7 @@ func Faces(frm form.SearchFaces) (results FaceResults, err error) {
 
 	// Show hidden faces?
 	if !txt.Yes(frm.Hidden) {
-		s = s.Where(fmt.Sprintf("%s.face_hidden = 0", facesTable))
+		s = s.Where(fmt.Sprintf("%s.face_hidden = FALSE", facesTable))
 	}
 
 	// Perform query.

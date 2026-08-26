@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/ai/face"
 	"github.com/photoprism/photoprism/internal/entity"
@@ -32,13 +32,13 @@ type FaceMigrationCluster struct {
 
 // FaceMigrationMarkerCounts summarizes marker work for a target model.
 type FaceMigrationMarkerCounts struct {
-	Total      int
-	Valid      int
-	Invalid    int
-	Ready      int
-	Unlinked   int
-	Unreadable int
-	Manual     int
+	Total      int64
+	Valid      int64
+	Invalid    int64
+	Ready      int64
+	Unlinked   int64
+	Unreadable int64
+	Manual     int64
 }
 
 // FaceMigrationCounts returns marker counts used by dry-run and final reports.
@@ -47,17 +47,16 @@ func FaceMigrationCounts(model string) (result FaceMigrationMarkerCounts, err er
 		return result, fmt.Errorf("faces: migration model is required")
 	}
 
-	base := Db().Model(&entity.Marker{}).Where("marker_type = ?", entity.MarkerFace)
-
+	base := Db().Model(&entity.Marker{}).Where("marker_type = ?", entity.MarkerFace).Session(&gorm.Session{})
 	queries := []struct {
 		stmt *gorm.DB
-		dest *int
+		dest *int64
 	}{
 		{base, &result.Total},
-		{base.Where("marker_invalid = 0"), &result.Valid},
-		{base.Where("marker_invalid = 1"), &result.Invalid},
-		{whereEmbeddingModel(base.Where("marker_invalid = 0 AND LENGTH(embeddings_json) > 0"), model), &result.Ready},
-		{base.Where("marker_invalid = 0 AND file_uid = ''"), &result.Unlinked},
+		{base.Where("marker_invalid = FALSE"), &result.Valid},
+		{base.Where("marker_invalid = TRUE"), &result.Invalid},
+		{whereEmbeddingModel(base.Where("marker_invalid = FALSE AND LENGTH(embeddings_json) > 0"), model), &result.Ready},
+		{base.Where("marker_invalid = FALSE AND file_uid = ''"), &result.Unlinked},
 		{whereFaceMigrationUnreadableFile(base), &result.Unreadable},
 		{base.Where("subj_src = ?", entity.SrcManual), &result.Manual},
 	}
@@ -78,11 +77,11 @@ func FaceMigrationCounts(model string) (result FaceMigrationMarkerCounts, err er
 // advance. It answers from the index, so it cannot see a file that has gone missing since.
 func whereFaceMigrationUnreadableFile(stmt *gorm.DB) *gorm.DB {
 	return stmt.
-		Where("marker_invalid = 0 AND file_uid <> ''").
+		Where("marker_invalid = FALSE AND file_uid <> ''").
 		Where("file_uid NOT IN (?)", Db().Model(&entity.File{}).
 			Select("file_uid").
-			Where("file_uid <> '' AND file_missing = 0 AND file_error = ''").
-			QueryExpr())
+			Where("file_uid <> '' AND file_missing = FALSE AND file_error = ''").
+			Find(&entity.Files{}))
 }
 
 // FaceMigrationFileUIDs returns the next batch of files that contain valid face markers.
@@ -92,7 +91,7 @@ func FaceMigrationFileUIDs(after string, limit int) (result []string, err error)
 	}
 
 	stmt := Db().Model(&entity.Marker{}).
-		Where("marker_type = ? AND marker_invalid = 0 AND file_uid <> ''", entity.MarkerFace)
+		Where("marker_type = ? AND marker_invalid = FALSE AND file_uid <> ''", entity.MarkerFace)
 
 	if after != "" {
 		stmt = stmt.Where("file_uid > ?", after)
@@ -110,7 +109,7 @@ func FaceMigrationMarkers(fileUID string) (result entity.Markers, err error) {
 	}
 
 	err = Db().
-		Where("file_uid = ? AND marker_type = ? AND marker_invalid = 0", fileUID, entity.MarkerFace).
+		Where("file_uid = ? AND marker_type = ? AND marker_invalid = FALSE", fileUID, entity.MarkerFace).
 		Order("marker_uid").Find(&result).Error
 
 	return result, err
@@ -134,7 +133,7 @@ func HiddenFaceMarkers() (result []string, err error) {
 	err = Db().Model(&entity.Marker{}).
 		Where("marker_type = ? AND face_id <> ''", entity.MarkerFace).
 		Where("face_id IN (?)", Db().Model(&entity.Face{}).Select("id").
-			Where("face_hidden = 1").QueryExpr()).
+			Where("face_hidden = TRUE").Find(&entity.Faces{})).
 		Order("marker_uid").Pluck("marker_uid", &result).Error
 
 	return result, err
@@ -212,7 +211,7 @@ func FaceMigrationIdentities() (result []FaceMigrationIdentity, err error) {
 // The size and score bar is the one query.Embeddings and entity.Marker.Face() apply, so a face too
 // small to be clustered cannot define a centroid either.
 func whereFaceMigrationSamples(stmt *gorm.DB, model string) *gorm.DB {
-	stmt = stmt.Where("marker_type = ? AND marker_invalid = 0", entity.MarkerFace).
+	stmt = stmt.Where("marker_type = ? AND marker_invalid = FALSE", entity.MarkerFace).
 		Where("subj_uid <> ''").
 		Where("LENGTH(embeddings_json) > 0")
 
@@ -262,19 +261,19 @@ func FaceMigrationSubjectMarkers(model, subjUID string) (result entity.Markers, 
 // It counts the complement of whereFaceMigrationSamples over the same rows, so the bars are
 // read from one place: a count computed from its own copy of them reports on a set the rebuild
 // does not use.
-func FaceMigrationLowQualityMarkers(model string) (count int, err error) {
+func FaceMigrationLowQualityMarkers(model string) (count int64, err error) {
 	if model == "" {
 		return 0, fmt.Errorf("faces: migration model is required")
 	}
 
 	assigned := func() *gorm.DB {
 		return whereEmbeddingModel(Db().Model(&entity.Marker{}).
-			Where("marker_type = ? AND marker_invalid = 0", entity.MarkerFace).
+			Where("marker_type = ? AND marker_invalid = FALSE", entity.MarkerFace).
 			Where("subj_uid <> ''").
 			Where("LENGTH(embeddings_json) > 0"), model)
 	}
 
-	var total, samples int
+	var total, samples int64
 
 	if err = assigned().Count(&total).Error; err != nil {
 		return 0, err
@@ -290,7 +289,7 @@ func FaceMigrationLowQualityMarkers(model string) (count int, err error) {
 //
 // These markers are not stale in the embedding sense, which is why they are counted apart: a
 // re-embedding that cannot find them again keeps the vector they already hold.
-func FaceMigrationRecropMarkers(model, detector string) (count int, err error) {
+func FaceMigrationRecropMarkers(model, detector string) (count int64, err error) {
 	if model == "" {
 		return 0, fmt.Errorf("faces: migration model is required")
 	}
@@ -302,7 +301,7 @@ func FaceMigrationRecropMarkers(model, detector string) (count int, err error) {
 	}
 
 	err = whereEmbeddingModel(Db().Model(&entity.Marker{}).
-		Where("marker_type = ? AND marker_invalid = 0", entity.MarkerFace).
+		Where("marker_type = ? AND marker_invalid = FALSE", entity.MarkerFace).
 		Where("LENGTH(embeddings_json) > 0").
 		Where("detect_model <> ?", detector), model).
 		Count(&count).Error
@@ -392,7 +391,7 @@ func FinalizeFaceMigration(model string, identities []FaceMigrationIdentity, clu
 	}
 
 	return UnscopedDb().Transaction(func(tx *gorm.DB) error {
-		if err := tx.Delete(&entity.Face{}).Error; err != nil {
+		if err := tx.Where("1=1").Delete(&entity.Face{}).Error; err != nil {
 			return err
 		}
 
@@ -407,7 +406,7 @@ func FinalizeFaceMigration(model string, identities []FaceMigrationIdentity, clu
 
 		if err := tx.Model(&entity.Marker{}).
 			Where("marker_type = ?", entity.MarkerFace).
-			Where("marker_invalid = 1 OR file_uid = '' OR LENGTH(embeddings_json) = 0 OR "+cond, args...).
+			Where("marker_invalid = TRUE OR file_uid = '' OR LENGTH(embeddings_json) = 0 OR "+cond, args...).
 			UpdateColumns(entity.Values{"embeddings_json": []byte(""), "embed_model": "", "detect_model": ""}).Error; err != nil {
 			return err
 		}
