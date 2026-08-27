@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/photoprism/photoprism/internal/event"
+
 	"github.com/photoprism/photoprism/internal/form"
 )
 
@@ -302,11 +304,11 @@ func TestSubject_Updates(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := m.Updates(Subject{SubjName: "UpdatedName", SubjType: "UpdatedType"}); err != nil {
+		if err := m.Updates(Subject{SubjName: "UpdatedName", SubjType: "newtype"}); err != nil {
 			t.Fatal(err)
 		} else {
 			assert.Equal(t, "UpdatedName", m.SubjName)
-			assert.Equal(t, "UpdatedType", m.SubjType)
+			assert.Equal(t, "newtype", m.SubjType)
 		}
 	})
 
@@ -496,6 +498,34 @@ func TestSubject_UpdateName(t *testing.T) {
 			assert.Equal(t, "new-new", s.SubjSlug)
 		}
 	})
+	t.Run("PublishesUidOnlyUpdatedEvents", func(t *testing.T) {
+		m := NewSubject("Uid Only Person", SubjPerson, SrcAuto)
+
+		if err := m.Save(); err != nil {
+			t.Fatal(err)
+		}
+
+		sub := event.Subscribe("subjects.updated", "people.updated")
+		t.Cleanup(func() { event.Unsubscribe(sub) })
+
+		if _, err := m.UpdateName("Uid Only Renamed"); err != nil {
+			t.Fatal(err)
+		}
+
+		// A rename publishes one subjects.updated and one people.updated event,
+		// both carrying only the subject UID.
+		for _, expected := range []string{"subjects.updated", "people.updated"} {
+			select {
+			case msg := <-sub.Receiver:
+				assert.Equal(t, expected, msg.Name)
+				uids, ok := msg.Fields["entities"].([]string)
+				assert.True(t, ok, "entities payload should be []string, got %T", msg.Fields["entities"])
+				assert.Equal(t, []string{m.SubjUID}, uids)
+			case <-time.After(2 * time.Second):
+				t.Fatalf("expected one %s event", expected)
+			}
+		}
+	})
 	t.Run("SubjNameEmpty", func(t *testing.T) {
 		m := NewSubject("Empty", SubjPerson, SrcAuto)
 
@@ -586,4 +616,66 @@ func TestSubject_DeletePermanently(t *testing.T) {
 
 	assert.NotEmpty(t, m.DeletedAt)
 	assert.Empty(t, FindSubject(m.SubjUID))
+}
+
+func TestReassignSubject(t *testing.T) {
+	t.Run("OtherPersonOwnsName", func(t *testing.T) {
+		subj := FirstOrCreateSubject(NewSubject("Reassign Lookup Source", SubjPerson, SrcManual))
+		other := FirstOrCreateSubject(NewSubject("Reassign Lookup Target", SubjPerson, SrcManual))
+
+		if subj == nil || other == nil {
+			t.Fatal("failed creating test subjects")
+		}
+
+		found := ReassignSubject(subj, "Reassign Lookup Target")
+
+		if assert.NotNil(t, found) {
+			assert.Equal(t, other.SubjUID, found.SubjUID)
+		}
+	})
+	t.Run("NameIsUnused", func(t *testing.T) {
+		subj := FirstOrCreateSubject(NewSubject("Reassign Lookup Unused", SubjPerson, SrcManual))
+
+		if subj == nil {
+			t.Fatal("failed creating test subject")
+		}
+
+		assert.Nil(t, ReassignSubject(subj, "Reassign Lookup Nobody Has This"))
+	})
+	t.Run("SamePerson", func(t *testing.T) {
+		subj := FirstOrCreateSubject(NewSubject("Reassign Lookup Self", SubjPerson, SrcManual))
+
+		if subj == nil {
+			t.Fatal("failed creating test subject")
+		}
+
+		assert.Nil(t, ReassignSubject(subj, "Reassign Lookup Self"))
+	})
+	t.Run("EmptyName", func(t *testing.T) {
+		subj := FirstOrCreateSubject(NewSubject("Reassign Lookup Empty", SubjPerson, SrcManual))
+
+		if subj == nil {
+			t.Fatal("failed creating test subject")
+		}
+
+		assert.Nil(t, ReassignSubject(subj, ""))
+		assert.Nil(t, ReassignSubject(subj, "   "))
+	})
+	t.Run("NilSubject", func(t *testing.T) {
+		assert.Nil(t, ReassignSubject(nil, "Reassign Lookup Target"))
+	})
+	t.Run("DeletedPersonOwnsName", func(t *testing.T) {
+		subj := FirstOrCreateSubject(NewSubject("Reassign Lookup Live", SubjPerson, SrcManual))
+		gone := FirstOrCreateSubject(NewSubject("Reassign Lookup Gone", SubjPerson, SrcManual))
+
+		if subj == nil || gone == nil {
+			t.Fatal("failed creating test subjects")
+		}
+
+		if err := gone.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Nil(t, ReassignSubject(subj, "Reassign Lookup Gone"))
+	})
 }

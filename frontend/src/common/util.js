@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -13,7 +13,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
     The AGPL is supplemented by our Trademark and Brand Guidelines,
     which describe how our Brand Assets may be used:
-    <https://www.photoprism.app/trademark>
+    <https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -95,31 +95,32 @@ const sanitizeHtmlOptions = Object.freeze({
 const debug = window.__CONFIG__?.debug || window.__CONFIG__?.trace;
 
 export default class $util {
-  // Canonical-form normalizer for short identifiers that are user-typed
-  // and dedup-compared (label names, album titles, and similar). Lowercases,
-  // expands `&` to `and`, treats `+` / `_` / `-` as whitespace, strips other
-  // punctuation, and collapses runs of whitespace. Letters, digits, and
-  // emoji sequences (incl. ZWJ + skin-tone modifiers + regional indicators)
-  // are preserved so user-defined emoji-only titles round-trip.
+  // normalizeTitle returns the dedup-comparison form of a user-typed identifier:
+  // lowercased, `&` → `and`, non-letter/digit/emoji runs collapsed to single
+  // spaces and trimmed. Emoji sequences (ZWJ, skin tone, regional indicators)
+  // are preserved so emoji-only titles round-trip.
   static normalizeTitle(s) {
-    if (s === null || s === undefined) return "";
+    if (s === null || s === undefined) {
+      return "";
+    }
     return (
       String(s)
         .toLowerCase()
         .replace(/&/g, "and")
-        .replace(/[+_-]+/g, " ")
         // ZWJ (U+200D), VS-15/16 (U+FE0E/F), and the keycap combining mark (U+20E3) sit in this
         // class on purpose so composite emoji sequences survive normalization; eslint flags them as
         // a "misleading character class" because they only carry meaning when paired with the
         // pictographic ranges already listed above.
         // eslint-disable-next-line no-misleading-character-class
-        .replace(/[^\p{L}\p{N}\p{Extended_Pictographic}\p{Emoji_Component}\p{Regional_Indicator}\p{Emoji_Modifier}\u200d\ufe0e\ufe0f\u20e3 ]+/gu, "")
+        .replace(/[^\p{L}\p{N}\p{Extended_Pictographic}\p{Emoji_Component}\p{Regional_Indicator}\p{Emoji_Modifier}\u200d\ufe0e\ufe0f\u20e3 ]+/gu, " ")
         .replace(/\s+/g, " ")
         .trim()
     );
   }
   static slugifyLabelTitle(s) {
-    if (s === null || s === undefined) return "";
+    if (s === null || s === undefined) {
+      return "";
+    }
     return String(s)
       .toLowerCase()
       .replace(/&/g, "and")
@@ -321,8 +322,9 @@ export default class $util {
       I: 1,
     };
     let a;
-    if (number < 1 || number > 3999) return "";
-    else {
+    if (number < 1 || number > 3999) {
+      return "";
+    } else {
       for (let key in romanNumList) {
         a = Math.floor(number / romanNumList[key]);
         if (a >= 0) {
@@ -468,12 +470,31 @@ export default class $util {
     return navigator.maxTouchPoints > 0;
   }
 
-  // isMobile performs a basic user-agent and capability check for mobile devices.
+  // shouldOpenOnHover reports whether menus should open on hover: the user's UI
+  // preference (default on) gated by the device having no touch input.
+  static shouldOpenOnHover() {
+    return ($config.getSettings()?.ui?.openOnHover ?? true) && !$util.hasTouch();
+  }
+
+  // mapAnimateDuration returns the map fly-to animation duration in milliseconds, forcing 0
+  // (no animation) when the Reduce Motion accessibility setting is enabled. A non-negative
+  // overrideMs takes precedence over the global Maps.Animate preference.
+  static mapAnimateDuration(settings, overrideMs = -1) {
+    if (settings?.ui?.reduceMotion) {
+      return 0;
+    }
+
+    if (overrideMs >= 0) {
+      return overrideMs;
+    }
+
+    return settings?.maps?.animate ?? 0;
+  }
+
+  // isMobile returns true when the current user agent or touch capability indicates a mobile device.
+  // The `> 2` touch check covers iPads in desktop mode, where the user agent omits the mobile hint.
   static isMobile() {
-    return (
-      /Android|webOS|iPhone|iPad|iPod|BlackBerry|Mobile|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
-      (navigator.maxTouchPoints && navigator.maxTouchPoints > 2)
-    );
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|Mobile|IEMobile|Opera Mini/i.test(navigator?.userAgent) || navigator?.maxTouchPoints > 2;
   }
 
   // isHttps returns true when the current page is served over HTTPS.
@@ -823,6 +844,35 @@ export default class $util {
     }
   }
 
+  // typeName returns the localized label for a media type value
+  // (the same `value` field used by options/options.js#PhotoTypes).
+  // Returns `defaultValue` (or the empty string) for unknown / missing
+  // types so callers can fall back to a generic label like "File".
+  static typeName(type, defaultValue) {
+    switch (type) {
+      case media.Image:
+        return $gettext("Image");
+      case media.Raw:
+        return $gettext("Raw");
+      case media.Live:
+        return $gettext("Live");
+      case media.Video:
+        return $gettext("Video");
+      case media.Audio:
+        return $gettext("Audio");
+      case media.Animated:
+        return $gettext("Animated");
+      case media.Vector:
+        return $gettext("Vector");
+      case media.Document:
+        return $gettext("Document");
+      case media.Sidecar:
+        return $gettext("Sidecar");
+      default:
+        return defaultValue !== undefined ? defaultValue : "";
+    }
+  }
+
   // sourceName returns the localized label for a metadata source.
   static sourceName(src, defaultValue) {
     switch (src) {
@@ -973,6 +1023,17 @@ export default class $util {
   // videoUrl resolves the best playable video URL for given codec hints.
   static videoUrl(hash, codec, mime) {
     return this.videoFormatUrl(hash, this.videoFormat(codec, mime));
+  }
+
+  // pdfUrl builds the inline PDF URL for a file hash. The bytes are served by the
+  // session-scoped /files/<hash>/file.pdf endpoint; pdf.js authenticates the request via the
+  // X-Auth-Token header (see loadPdfDocument), so no token is needed in the path.
+  static pdfUrl(hash) {
+    if (!hash) {
+      return "";
+    }
+
+    return `${$config.apiUri}/files/${hash}/file.pdf`;
   }
 
   // videoContentType returns the HTTP content type matching the chosen video format.

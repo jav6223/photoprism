@@ -96,6 +96,13 @@ func (w *Vision) Start(filter string, count int, models []string, customSrc stri
 		}
 	}()
 
+	// A face migration runs from another process and rewrites every marker vector, so generating
+	// embeddings alongside it would write them in the model it is migrating away from.
+	if held := w.conf.FacesLocked(); held != "" {
+		log.Infof("vision: waiting for the %s to complete", held)
+		return nil
+	}
+
 	if err = mutex.VisionWorker.Start(); err != nil {
 		return err
 	}
@@ -218,7 +225,7 @@ func (w *Vision) Start(filter string, count int, models []string, customSrc stri
 				faces, detectErr := photoprism.DetectFaces(file, expected)
 				if detectErr != nil {
 					log.Debugf("vision: %s in %s (detect faces)", detectErr, clean.Log(file.BaseName()))
-				} else if saved, faceCount, applyErr := photoprism.ApplyDetectedFaces(primaryFile, faces); applyErr != nil {
+				} else if saved, faceCount, applyErr := photoprism.ApplyDetectedFaces(file, primaryFile, faces); applyErr != nil {
 					log.Warnf("vision: %s in %s (save faces)", clean.Error(applyErr), logName)
 				} else if saved {
 					m.PhotoFaces = faceCount
@@ -269,12 +276,13 @@ func (w *Vision) Start(filter string, count int, models []string, customSrc stri
 		if changed {
 			if saveErr := m.SaveVision(); saveErr == nil {
 				updated++
-			}
 
-			// Save sidecar YAML backup if enabled.
-			if w.conf.SidecarYaml() {
-				if yamlErr := m.SaveSidecarYaml(w.conf.OriginalsPath(), w.conf.SidecarPath()); yamlErr != nil {
-					log.Errorf("vision: %s (save yaml sidecar)", yamlErr)
+				// Save sidecar YAML backup if enabled. Writing it only after a successful
+				// save keeps the backup from describing metadata the database rejected.
+				if w.conf.SidecarYaml() {
+					if yamlErr := m.SaveSidecarYaml(w.conf.OriginalsPath(), w.conf.SidecarPath()); yamlErr != nil {
+						log.Errorf("vision: %s in %s (save yaml sidecar)", clean.Error(yamlErr), logName)
+					}
 				}
 			}
 		}

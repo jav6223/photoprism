@@ -12,7 +12,6 @@ import (
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
-	"github.com/photoprism/photoprism/pkg/txt"
 )
 
 // UpdateLink updates a share link and return it as JSON.
@@ -53,19 +52,19 @@ func UpdateLink(c *gin.Context) {
 
 	if frm.Password != "" {
 		if err := link.SetPassword(frm.Password); err != nil {
-			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+			Abort(c, http.StatusConflict, i18n.ErrSaveFailed)
 			return
 		}
 	}
 
 	if err := link.Save(); err != nil {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+		Abort(c, http.StatusConflict, i18n.ErrSaveFailed)
 		return
 	}
 
 	UpdateClientConfig()
 
-	PublishAlbumEvent(StatusUpdated, link.ShareUID, c)
+	PublishAlbumEvent(StatusUpdated, link.ShareUID)
 
 	c.JSON(http.StatusOK, link)
 }
@@ -84,13 +83,13 @@ func DeleteLink(c *gin.Context) {
 	link := entity.FindLink(clean.Token(c.Param("link")))
 
 	if err := link.Delete(); err != nil {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+		Abort(c, http.StatusConflict, i18n.ErrDeleteFailed)
 		return
 	}
 
 	UpdateClientConfig()
 
-	PublishAlbumEvent(StatusUpdated, link.ShareUID, c)
+	PublishAlbumEvent(StatusUpdated, link.ShareUID)
 
 	c.JSON(http.StatusOK, link)
 }
@@ -135,19 +134,19 @@ func CreateLink(c *gin.Context) {
 
 	if frm.Password != "" {
 		if err := link.SetPassword(frm.Password); err != nil {
-			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+			Abort(c, http.StatusConflict, i18n.ErrSaveFailed)
 			return
 		}
 	}
 
 	if err := link.Save(); err != nil {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+		Abort(c, http.StatusConflict, i18n.ErrSaveFailed)
 		return
 	}
 
 	UpdateClientConfig()
 
-	PublishAlbumEvent(StatusUpdated, link.ShareUID, c)
+	PublishAlbumEvent(StatusUpdated, link.ShareUID)
 
 	c.JSON(http.StatusOK, link)
 }

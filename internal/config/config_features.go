@@ -36,6 +36,13 @@ func (c *Config) DisableWebDAV() bool {
 	return c.options.DisableWebDAV
 }
 
+// DisableAppPasswords checks if app passwords should be disabled, so they cannot be
+// created and existing ones are no longer accepted as a credential. Backed by the
+// AppPasswords feature flag (Settings UI / PHOTOPRISM_DISABLE_FEATURES).
+func (c *Config) DisableAppPasswords() bool {
+	return !c.Settings().Features.AppPasswords
+}
+
 // DisableMCP checks if the Model Context Protocol (MCP) API endpoint should be disabled.
 func (c *Config) DisableMCP() bool {
 	return c.options.DisableMCP
@@ -78,6 +85,11 @@ func (c *Config) DisableFaces() bool {
 	}
 
 	return false
+}
+
+// XMPFaces checks if importing face regions and names from XMP metadata is enabled.
+func (c *Config) XMPFaces() bool {
+	return c.options.XMPFaces
 }
 
 // DisableClassification checks if image classification is disabled.

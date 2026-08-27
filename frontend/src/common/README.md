@@ -1,6 +1,6 @@
 ## View Helper Guidelines
 
-**Last Updated:** March 8, 2026
+**Last Updated:** May 19, 2026
 
 ### Focus Management
 
@@ -17,6 +17,7 @@ When integrating third-party clients such as native mobile apps that embed the P
 - Storage keys are namespaced per app site via `storageNamespace` and use the format `pp:<storageNamespace>:<key>`. When no namespace is available, the fallback prefix is `pp:root:`.
 - Session restore requires both `session.token` and `session.id`. A token-only write does not create an authenticated session state during startup.
 - Optional session metadata keys are `session.provider`, `session.user`, `session.scope`, `session.data`, and `session.error`.
+- The login-flow keys `login.next` and `login.logout` live in namespaced `localStorage` outside the `session.*` prefix so they survive the OIDC callback's clear list. `login.next` is the deep-link target captured by the global router guard via `$session.setLoginRedirectUrl(to.href)`; the `/login` route reads it through `$session.hasLoginRedirectUrl()` (deep-link arrival signal) and consumes it with `$session.followLoginRedirectUrl()` after authentication. `login.logout` is a one-shot raised by every logout path so the very next deep-link arrival skips the auto-OIDC bounce, letting users sign in locally instead.
 - The storage preference flag is always stored in namespaced `localStorage` under `session`. A value of `"true"` tells the app to use namespaced `sessionStorage` for the active session; any other value falls back to namespaced `localStorage`.
 - `Session` must resolve `storageNamespace` from the actual client config shape used at runtime. In production, that value may be present on `config.values.storageNamespace` even when a direct `config.storageNamespace` property is absent.
 - The OIDC callback template clears legacy global auth/session payload keys and namespaced session data keys from `localStorage` and `sessionStorage`, but preserves the `session` storage-preference flag so OIDC flows using ephemeral `sessionStorage` remain logged in after redirect.
@@ -26,6 +27,7 @@ When integrating third-party clients such as native mobile apps that embed the P
 - In the standard login UI, this preference is exposed through the `Stay signed in on this device` toggle. Checked means persistent namespaced `localStorage`; unchecked means ephemeral namespaced `sessionStorage`.
 - The login page initializes that toggle from the current session storage mode when available, and otherwise falls back to the stored namespaced `session` preference flag.
 - Logout and session reset clear the current app namespace from both `localStorage` and `sessionStorage`, and also remove deprecated raw legacy auth keys from both stores, without touching other namespaced instances on the same origin.
+- When `PHOTOPRISM_OIDC_LOGOUT` is enabled, `DELETE /api/v1/session` returns a `providerLogoutUri`; `logout()` passes it to `onLogout()`, which redirects the browser to the provider's end-session endpoint (RP-initiated logout) instead of the local login page, so the provider's SSO session is ended too. `onLogout()` also resolves to that landing URL, so callers that pass `noRedirect` and navigate themselves — the `/logout` route guard and the Portal instance-chooser Sign-Out — follow the same provider URL rather than discarding it. Without the flag, sign-out lands on the local/Portal login page as before.
 - Regression tests for session restore should exercise both preferred `sessionStorage` and a real `Config`-shaped object so namespace resolution bugs cannot silently fall back to `pp:root:`.
 
 Preferred integration contract for new native or web view clients:

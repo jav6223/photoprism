@@ -12,6 +12,7 @@ import (
 
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/time/unix"
 )
 
@@ -45,6 +46,30 @@ func AsyncJobDone() {
 // database connection should invoke this before nilling the provider.
 func WaitForAsyncJobs() {
 	asyncWG.Wait()
+}
+
+// WaitForAsyncJobsTimeout waits up to timeout for async jobs to finish and reports
+// whether they all drained; a non-positive timeout waits indefinitely. It bounds
+// database teardown so a wedged background job cannot hang shutdown forever.
+func WaitForAsyncJobsTimeout(timeout time.Duration) bool {
+	if timeout <= 0 {
+		asyncWG.Wait()
+		return true
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		asyncWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 type LabelPhotoCount struct {
@@ -133,7 +158,7 @@ func UpdateSubjectCounts(public bool) (err error) {
 	condition := gorm.Expr("subj_type = ?", SubjPerson)
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		res = Db().Exec(`UPDATE ? LEFT JOIN (
 		SELECT m.subj_uid, COUNT(DISTINCT f.id) AS subj_files, COUNT(DISTINCT f.photo_id) AS subj_photos
 			FROM files f
@@ -144,7 +169,7 @@ func UpdateSubjectCounts(public bool) (err error) {
 		SET subjects.file_count = CASE WHEN b.subj_files IS NULL THEN 0 ELSE b.subj_files END, 
 			subjects.photo_count = CASE WHEN b.subj_photos IS NULL THEN 0 ELSE b.subj_photos END
 		WHERE ?`, gorm.Expr(subjTable), photosJoin, condition)
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		// Update files count.
 		res = Db().Table(subjTable).
 			UpdateColumn("file_count", gorm.Expr("(SELECT COUNT(DISTINCT f.id)"+
@@ -155,14 +180,16 @@ func UpdateSubjectCounts(public bool) (err error) {
 		// Update photo count.
 		if res.Error != nil {
 			return res.Error
-		} else {
-			photosRes := Db().Table(subjTable).
-				UpdateColumn("photo_count", gorm.Expr("(SELECT COUNT(DISTINCT f.photo_id)"+
-					" FROM files f JOIN photos p ON ?"+
-					" JOIN markers m ON f.file_uid = m.file_uid AND m.subj_uid = subjects.subj_uid"+
-					" WHERE m.marker_invalid = 0 AND f.deleted_at IS NULL) WHERE ?", photosJoin, condition))
-			res.RowsAffected += photosRes.RowsAffected
 		}
+		photosRes := Db().Table(subjTable).
+			UpdateColumn("photo_count", gorm.Expr("(SELECT COUNT(DISTINCT f.photo_id)"+
+				" FROM files f JOIN photos p ON ?"+
+				" JOIN markers m ON f.file_uid = m.file_uid AND m.subj_uid = subjects.subj_uid"+
+				" WHERE m.marker_invalid = 0 AND f.deleted_at IS NULL) WHERE ?", photosJoin, condition))
+		if photosRes.Error != nil {
+			return photosRes.Error
+		}
+		res.RowsAffected += photosRes.RowsAffected
 	default:
 		return fmt.Errorf("sql: unsupported dialect %s", DbDialect())
 	}
@@ -217,7 +244,7 @@ func UpdateLabelCounts() (err error) {
 
 	start := time.Now()
 	var res *gorm.DB
-	if IsDialect(MySQL) {
+	if IsDialect(dsn.DriverMySQL) {
 		res = Db().Exec(`UPDATE labels LEFT JOIN (
 		SELECT p2.label_id, COUNT(DISTINCT photo_id) AS label_photos FROM (
 			SELECT pl.label_id as label_id, p.id AS photo_id FROM photos p
@@ -231,7 +258,7 @@ func UpdateLabelCounts() (err error) {
 			) p2 GROUP BY p2.label_id
 		) b ON b.label_id = labels.id
 		SET photo_count = CASE WHEN b.label_photos IS NULL THEN 0 ELSE b.label_photos END`)
-	} else if IsDialect(SQLite3) {
+	} else if IsDialect(dsn.DriverSQLite3) {
 		res = Db().
 			Table("labels").
 			UpdateColumn("photo_count",

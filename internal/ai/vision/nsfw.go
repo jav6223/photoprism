@@ -43,7 +43,7 @@ func nsfwInternal(images Files, mediaSrc media.Src) (result []nsfw.Result, err e
 			var apiRequest *ApiRequest
 			var apiResponse *ApiResponse
 
-			if apiRequest, err = NewApiRequest(model.EndpointRequestFormat(), images, model.EndpointFileScheme()); err != nil {
+			if apiRequest, err = NewApiRequest(model.EndpointRequestFormat(), images, model.EndpointFileScheme(), mediaSrc); err != nil {
 				return result, err
 			}
 
@@ -84,7 +84,13 @@ func nsfwInternal(images Files, mediaSrc media.Src) (result []nsfw.Result, err e
 				}
 
 				if err != nil {
-					log.Errorf("nsfw: %s", err)
+					// Remote (API) references fail closed so the handler returns 400 like
+					// labels; local files stay tolerant so one non-JPEG cannot abort a batch.
+					if mediaSrc == media.SrcRemote {
+						return result, err
+					}
+
+					log.Debugf("nsfw: %s", err)
 				}
 
 				result[i] = labels

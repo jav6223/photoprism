@@ -1,7 +1,7 @@
 #### Base Image: Debian 13 (Trixie)
 FROM debian:trixie-slim
 
-# Copyright © 2018 - 2025 PhotoPrism UG. All rights reserved.
+# Copyright © 2018 - 2026 PhotoPrism UG. All rights reserved.
 #
 # Questions? Email us at hello@photoprism.app or visit our website to learn
 # more about our team, products and services: https://www.photoprism.app/
@@ -24,6 +24,7 @@ ARG BUILD_TAG
 ENV DO_NOT_TRACK=true \
     GH_TELEMETRY=false \
     DISABLE_TELEMETRY=1 \
+    ORT_DISABLE_TELEMETRY=1 \
     DISABLE_ERROR_REPORTING=1 \
     DISABLE_FEEDBACK_COMMAND=1 \
     CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 \
@@ -65,17 +66,17 @@ RUN echo 'APT::Acquire::Retries "3";' > /etc/apt/apt.conf.d/80retries && \
       libc6 ca-certificates sudo bash tzdata \
       xz-utils gpg zip unzip wget curl rsync make nano \
       jq lsof lshw sqlite3 mariadb-client postgresql-client ripgrep \
-      imagemagick libvips-dev libyuv0 libjxl-dev libjxl-tools \
+      imagemagick libvips42t64 libyuv0 libjxl-dev libjxl-tools \
       exiftool darktable rawtherapee libheif-examples librsvg2-bin librav1e-dev \
       ffmpeg libavcodec-extra libffmpeg-nvenc-dev libdav1d-dev x264 x265 libvpx-dev libwebm-dev \
       libmatroska-dev libdvdread-dev libebml5 libgav1-bin libatomic1 \
       va-driver-all libva2 iputils-ping dnsutils binutils binutils-gold \
+      ghostscript gsfonts \
     && \
-    echo 'alias ll="ls -alh"' >> /etc/skel/.bashrc && \
-    echo 'export PS1="\u@$DOCKER_TAG:\w\$ "' >> /etc/skel/.bashrc && \
+    cp /scripts/convert/policy.xml /etc/ImageMagick-7/policy.xml && \
+    /scripts/install-bashrc.sh && \
     echo "ALL ALL=(ALL) NOPASSWD:SETENV: /scripts/entrypoint-init.sh" >> /etc/sudoers.d/init && \
     /scripts/install-dircolors.sh && \
-    cp /etc/skel/.bashrc /root/.bashrc && \
     /scripts/create-users.sh && \
     install -d -m 0777 -o 1000 -g 1000 \
       /photoprism/originals \
@@ -88,7 +89,7 @@ RUN echo 'APT::Acquire::Retries "3";' > /etc/apt/apt.conf.d/80retries && \
       /photoprism/storage/cache && \
     /scripts/install-s6.sh && \
     ln -sf /scripts/services/photoprism /etc/s6-overlay/s6-rc.d/photoprism && \
-    touch /etc/s6-overlay/s6-rc.d/user/contents.d/photoprism && \
+    touch /etc/s6-overlay/user-bundles.d/user/contents.d/photoprism && \
     /scripts/cleanup.sh
 
 # Set default working directory.

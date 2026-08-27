@@ -15,8 +15,10 @@ import (
 	"github.com/ulule/deepcopier"
 
 	"github.com/photoprism/photoprism/internal/ai/face"
+	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/config/customize"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/media"
 	"github.com/photoprism/photoprism/pkg/media/colors"
@@ -28,6 +30,11 @@ import (
 
 const (
 	FileUID = byte('f')
+
+	// InstanceIDBytes is the byte budget for the instance_id column (VARBINARY(255)).
+	// XMP xmpMM:InstanceID values are clipped to it on write so an oversized identifier
+	// cannot overflow the column and abort indexing.
+	InstanceIDBytes = 255
 )
 
 // Files represents a file result set.
@@ -47,7 +54,7 @@ type File struct {
 	TimeIndex          *string       `gorm:"type:VARBINARY(64);" json:"TimeIndex" yaml:"TimeIndex"`
 	MediaID            *string       `gorm:"type:VARBINARY(32);" json:"MediaID" yaml:"MediaID"`
 	MediaUTC           int64         `gorm:"column:media_utc;index;"  json:"MediaUTC" yaml:"MediaUTC,omitempty"`
-	InstanceID         string        `gorm:"type:VARBINARY(64);index;" json:"InstanceID,omitempty" yaml:"InstanceID,omitempty"`
+	InstanceID         string        `gorm:"type:VARBINARY(255);index;" json:"InstanceID,omitempty" yaml:"InstanceID,omitempty"`
 	FileUID            string        `gorm:"type:VARBINARY(42);unique_index;" json:"UID" yaml:"UID"`
 	FileName           string        `gorm:"type:VARBINARY(1024);unique_index:idx_files_name_root;" json:"Name" yaml:"Name"`
 	FileRoot           string        `gorm:"type:VARBINARY(16);default:'/';unique_index:idx_files_name_root;" json:"Root" yaml:"Root,omitempty"`
@@ -104,13 +111,6 @@ func (File) TableName() string {
 // RegenerateIndex recalculates the denormalized search index columns for the matching files.
 // Calls acquire a mutex so concurrent writers do not stomp on shared indexes.
 func (m File) RegenerateIndex() {
-	fileIndexMutex.Lock()
-	defer fileIndexMutex.Unlock()
-
-	start := time.Now()
-
-	photosTable := Photo{}.TableName()
-
 	var updateWhere *gorm.SqlExpr
 	var scope string
 
@@ -128,8 +128,42 @@ func (m File) RegenerateIndex() {
 		scope = "index"
 	}
 
+	regenerateFileIndex(updateWhere, scope)
+}
+
+// RegenerateIndexForPhotoIDs recalculates the denormalized search index columns for the files of
+// the given photos in a single pass. Batch edits use it to refresh sorting immediately, since
+// newest/oldest keys off files.time_index / files.photo_taken_at rather than photos.taken_at.
+func RegenerateIndexForPhotoIDs(photoIDs []uint) {
+	if len(photoIDs) == 0 {
+		return
+	}
+
+	// Inline the numeric IDs: a nested slice placeholder inside the shared WHERE
+	// expression is not expanded, and uint values are safe from SQL injection.
+	inList := ""
+	for i, id := range photoIDs {
+		if i > 0 {
+			inList += ","
+		}
+		inList += fmt.Sprintf("%d", id)
+	}
+
+	regenerateFileIndex(gorm.Expr("files.photo_id IN ("+inList+")"), "index by photo ids")
+}
+
+// regenerateFileIndex runs the denormalized index UPDATEs for the files matched by updateWhere.
+// Calls acquire a mutex so concurrent writers do not stomp on shared indexes.
+func regenerateFileIndex(updateWhere *gorm.SqlExpr, scope string) {
+	fileIndexMutex.Lock()
+	defer fileIndexMutex.Unlock()
+
+	start := time.Now()
+
+	photosTable := Photo{}.TableName()
+
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		Log("files", "regenerate photo_taken_at",
 			Db().Exec("UPDATE files JOIN ? p ON p.id = files.photo_id SET files.photo_taken_at = p.taken_at_local WHERE ?",
 				gorm.Expr(photosTable), updateWhere).Error)
@@ -141,7 +175,7 @@ func (m File) RegenerateIndex() {
 		Log("files", "regenerate time_index",
 			Db().Exec("UPDATE files SET time_index = CASE WHEN media_id IS NOT NULL AND photo_taken_at IS NOT NULL THEN CONCAT(100000000000000 - CAST(photo_taken_at AS UNSIGNED), '-', media_id) ELSE NULL END WHERE ?",
 				updateWhere).Error)
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		Log("files", "regenerate photo_taken_at",
 			Db().Exec("UPDATE files SET photo_taken_at = (SELECT p.taken_at_local FROM ? p WHERE p.id = photo_id) WHERE ?",
 				gorm.Expr(photosTable), updateWhere).Error)
@@ -547,7 +581,7 @@ func (m *File) Rename(fileName, rootName, filePath, fileBase string) error {
 	// Update photo path and name if possible.
 	if p := m.RelatedPhoto(); p != nil {
 		return p.Updates(Values{
-			"PhotoPath": filePath,
+			"PhotoPath": ClipPath(filePath),
 			"PhotoName": fileBase,
 		})
 	}
@@ -674,7 +708,7 @@ func (m *File) IsAnimated() bool {
 
 // ColorProfile returns the ICC color profile name if any.
 func (m *File) ColorProfile() string {
-	return SanitizeStringType(m.FileColorProfile)
+	return ClipType(m.FileColorProfile)
 }
 
 // HasColorProfile tests if the file has a matching color profile.
@@ -684,8 +718,8 @@ func (m *File) HasColorProfile(profile colors.Profile) bool {
 
 // SetColorProfile sets the ICC color profile name such as "Display P3".
 func (m *File) SetColorProfile(name string) {
-	if name = SanitizeStringType(name); name != "" {
-		m.FileColorProfile = SanitizeStringType(name)
+	if name = ClipType(name); name != "" {
+		m.FileColorProfile = ClipType(name)
 	}
 }
 
@@ -696,9 +730,39 @@ func (m *File) ResetColorProfile() {
 
 // SetSoftware sets the software name.
 func (m *File) SetSoftware(name string) {
-	if name = SanitizeStringType(name); name != "" {
+	if name = ClipType(name); name != "" {
 		m.FileSoftware = name
 	}
+}
+
+// SetInstanceID sets the file instance identifier, clipping it to the column byte
+// budget on a rune boundary so an oversized XMP xmpMM:InstanceID cannot overflow the
+// instance_id column. An empty value leaves the current identifier unchanged.
+func (m *File) SetInstanceID(id string) {
+	if id = Clip(id, InstanceIDBytes); id != "" {
+		m.InstanceID = id
+	}
+}
+
+// RedactForSession removes identifying per-file metadata a shared-only session must not see when it
+// accesses a file through sharing: the XMP InstanceID (a content-provenance identifier) is cleared and
+// markers are omitted. Sessions with full library or admin access (and nil sessions) are unchanged.
+// This is the per-file counterpart of Photo.RedactForSession, so single-file reads (GetFile) and the
+// picture read (GetPhoto) strip the same fields.
+func (m *File) RedactForSession(sess *Session) *File {
+	if m == nil || sess == nil {
+		return m
+	}
+
+	// Only sessions limited to shared content are redacted.
+	if !sess.GetUser().HasSharedAccessOnly(acl.ResourcePhotos) && !sess.NotRegistered() {
+		return m
+	}
+
+	m.OmitMarkers = true
+	m.InstanceID = ""
+
+	return m
 }
 
 // SetDuration sets the video/animation duration.
@@ -798,6 +862,21 @@ func (m *File) AddFace(f face.Face, subjUid string) {
 		return
 	}
 
+	// A vector with non-finite values poisons every later distance, and one whose width
+	// disagrees with its own model belongs to no embedding space at all; a remote service
+	// can return either, so both are rejected here. The width is only checked against a
+	// known producer, because a vector that records no model implies no expected width.
+	dims := f.Embeddings.Dims()
+
+	if producer := face.FindEmbeddingModel(f.EmbedModel); producer != nil {
+		dims = producer.Dims
+	}
+
+	if !face.ValidEmbeddings(f.Embeddings, dims) {
+		log.Warnf("faces: skipped invalid %d-value embedding for file %s", f.Embeddings.Dims(), clean.Log(m.FileUID))
+		return
+	}
+
 	// Create new marker from face.
 	marker := NewFaceMarker(f, *m, subjUid)
 
@@ -806,8 +885,43 @@ func (m *File) AddFace(f face.Face, subjUid string) {
 		return
 	}
 
-	// Append marker if it doesn't conflict with existing marker.
-	if markers := m.Markers(); !markers.Contains(*marker) {
+	markers := m.Markers()
+
+	// Upgrade an embedding-less marker (e.g. one imported from XMP in a prior
+	// pass) in place with the detected embedding instead of letting the overlap
+	// check below drop the face and lose its embedding. Overlapping skips
+	// rejected markers, so a rejected face is not resurrected here.
+	if existing := markers.Overlapping(*marker); existing != nil {
+		if existing.Embeddings().Empty() {
+			landmarks := f.RelativeLandmarksJSON()
+
+			// For an already-saved marker, persist first and mutate in-memory
+			// only on success: a failed write must not leave an unpersisted
+			// embedding (Markers.Save does not re-write existing markers), so the
+			// marker stays embedding-less and is retried on the next pass.
+			if existing.MarkerUID != "" {
+				values := Values{
+					"embeddings_json": f.Embeddings.JSON(),
+					"embed_model":     f.EmbedModel,
+					"detect_model":    f.DetectModel,
+					"landmarks_json":  landmarks,
+				}
+
+				if err := existing.Updates(values); err != nil {
+					log.Warnf("faces: %s while adding embedding to marker %s", err, clean.Log(existing.MarkerUID))
+					return
+				}
+			}
+
+			existing.SetEmbeddings(f.Embeddings, f.EmbedModel, f.DetectModel)
+			existing.LandmarksJSON = landmarks
+		}
+
+		return
+	}
+
+	// Append marker if it doesn't conflict with an existing (including rejected) marker.
+	if !markers.Contains(*marker) {
 		markers.AppendWithEmbedding(*marker)
 	}
 }

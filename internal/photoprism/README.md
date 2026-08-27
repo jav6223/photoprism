@@ -1,6 +1,6 @@
 ## PhotoPrism — Core Package
 
-**Last Updated:** March 3, 2026
+**Last Updated:** August 20, 2026
 
 ### Overview
 
@@ -22,7 +22,8 @@
 
 - Indexing/import: `index.go`, `index_main.go`, `index_mediafile.go`, `index_related.go`, `import_worker.go`, `files.go`, `photos.go`.
 - Media files & helpers: `mediafile*.go`, `mediafile_thumbs.go`, `mediafile_vision.go`, `convert_*.go`, `colors.go`, `label.go`.
-- Faces/people: `faces_*.go` (audit, clustering, matching, optimize).
+- 360° originals: `mediafile_insta360.go` and `mediafile_projection.go` detect fisheye/dual-fisheye sources, `convert_image*.go` / `convert_video_avc.go` dewarp them to equirectangular derivatives, and `index_insta360.go` merges separate lens files into one photo on a forced rescan.
+- Faces/people: `faces_*.go` (audit, clustering, matching, optimize, migrate); face-marker persistence and XMP face-tag import in `index_faces.go` / `index_faces_xmp.go` (gated by `PHOTOPRISM_XMP_FACES`).
 - Backups: `backup/` (database and sidecar YAML backup/restore helpers).
 - Downloads: `dl/` (export and download handlers/helpers).
 - Service registry: `get/` (registry lookups and helper commands).
@@ -42,6 +43,7 @@
 - Import: run via `ImportWorker` with `ImportOptions`; stacked handling is driven by metadata and document IDs.
 - Converters: use `Convert.ToImage` / `Convert.ToVideo` / `Convert.ToJson`; options come from `config.Config`.
 - Vision: thumbnails for vision models are selected in `mediafile_vision.go`; ensure models exist in `internal/ai/vision`.
+- NSFW: `index_mediafile.go` flags new photos as `PhotoPrivate` when the labels-path NSFW shortcut (LLM with `DETECT_NSFW=true && EXPERIMENTAL=true`) hits or, as a fallback, when `m.DetectNSFW()` returns true and `PHOTOPRISM_DETECT_NSFW=true`. Both promotions short-circuit when `DetectNSFW()` is false. Full call-graph + flag matrix in [`internal/ai/nsfw/README.md`](../ai/nsfw/README.md).
 - Tests: targeted runs keep iteration fast, e.g.  
   - `go test ./internal/photoprism -run TestMediaFile_ -count=1`  
   - `go test ./internal/photoprism/index_mediafile_test.go -run TestIndexMediaFile`  
@@ -57,4 +59,5 @@
 - Exec calls to external tools are parameterized by config paths/binaries (`config.Config`).
 - Stacking rules honor document IDs, time/place proximity, and configuration (`StackUUID`, `StackMeta`).
 - Forced rescans (`IndexOptions.Rescan=true`) run folder album reconciliation at the end of indexing via `entity.ReconcileOriginalsFolderAlbums(...)`; normal incremental runs skip this pass.
+- Updated or newly added XMP sidecars next to originals are re-read on normal incremental passes. The filesystem walk compares each sidecar's modification time with `files.mod_time`, resolves its main media file from the Files cache, and queues deduplicated main-file jobs only after a successful walk; on forced rescans this detection is skipped because every main file is reindexed and re-reads its sidecar anyway. External XMP edits merge with `SrcXmp` priority, while `SrcManual` values are preserved. A sidecar that fails to parse records the error and advances its `mod_time`, so it is retried only after another edit instead of on every pass. Incremental sidecar deletion is not supported, and automatic removal of stale XMP-derived metadata is not guaranteed by a forced rescan: fields such as `UUID`, `CameraSerial`, and primary `InstanceID` do not retain enough source information for complete reconciliation.
 - Folder create/index conflict lookup uses unscoped folder reads in `internal/entity/folder.go` so soft-deleted rows are detectable for troubleshooting instead of causing repeated create/find mismatches.

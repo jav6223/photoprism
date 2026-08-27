@@ -1,6 +1,8 @@
 package vision
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestServiceEndpoint(t *testing.T) {
 	//nolint:gosec // G101: Credential-style URLs are intentional test fixtures.
@@ -50,8 +52,11 @@ func TestServiceEndpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.name == "ExpandsBaseUrlEnv" {
+			switch tt.name {
+			case "ExpandsBaseUrlEnv":
 				t.Setenv("OLLAMA_BASE_URL", "http://custom:11434")
+			case "FallbacksWhenEnvMissing":
+				t.Setenv("OLLAMA_BASE_URL", "http://ollama:11434")
 			}
 
 			uri, method := tt.svc.Endpoint()
@@ -68,10 +73,11 @@ func TestServiceEndpoint(t *testing.T) {
 func TestServiceCredentialsAndHeaders(t *testing.T) {
 	t.Setenv("VISION_USER", "alice")
 	t.Setenv("VISION_PASS", "hunter2")
-	t.Setenv("VISION_MODEL", "GEMMA3:Latest")
+	t.Setenv("VISION_MODEL", "QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ")
 	t.Setenv("VISION_ORG", "org-123")
 	t.Setenv("VISION_PROJECT", "proj-abc")
 	t.Setenv("VISION_THINK", "false")
+	t.Setenv("VISION_TIER", "flex")
 
 	svc := Service{
 		Username: "${VISION_USER}",
@@ -80,6 +86,7 @@ func TestServiceCredentialsAndHeaders(t *testing.T) {
 		Org:      "${VISION_ORG}",
 		Project:  "${VISION_PROJECT}",
 		Think:    "${VISION_THINK}",
+		Tier:     "${VISION_TIER}",
 	}
 
 	user, pass := svc.BasicAuth()
@@ -87,7 +94,7 @@ func TestServiceCredentialsAndHeaders(t *testing.T) {
 		t.Fatalf("basic auth: got %q/%q", user, pass)
 	}
 
-	if got := svc.GetModel(); got != "gemma3:latest" {
+	if got := svc.GetModel(); got != "QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ" {
 		t.Fatalf("model override: got %q", got)
 	}
 
@@ -101,5 +108,9 @@ func TestServiceCredentialsAndHeaders(t *testing.T) {
 
 	if got := svc.EndpointThink(); got != "false" {
 		t.Fatalf("think: got %q", got)
+	}
+
+	if got := svc.EndpointTier(); got != "flex" {
+		t.Fatalf("tier: got %q", got)
 	}
 }

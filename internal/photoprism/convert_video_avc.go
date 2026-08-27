@@ -10,11 +10,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/ffmpeg"
 	"github.com/photoprism/photoprism/internal/ffmpeg/encode"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
+	"github.com/photoprism/photoprism/pkg/log/status"
+	"github.com/photoprism/photoprism/pkg/media/projection"
 )
 
 // ToAvc converts a single video file to MPEG-4 AVC.
@@ -22,6 +26,12 @@ func (w *Convert) ToAvc(f *MediaFile, encoder encode.Encoder, noMutex, force boo
 	// Abort if the source media file is nil.
 	if f == nil {
 		return nil, fmt.Errorf("convert: no media file provided for processing - you may have found a bug")
+	}
+
+	// Normalize every member of a complete Insta360 capture to its canonical left lens so manual
+	// conversion, background conversion, and playback all reuse one equirectangular AVC sidecar.
+	if capture := FindInsta360Capture(f); capture != nil && capture.ValidPair() {
+		f = capture.Left
 	}
 
 	// Sanitized relative filename for use in logs.
@@ -34,6 +44,13 @@ func (w *Convert) ToAvc(f *MediaFile, encoder encode.Encoder, noMutex, force boo
 		return nil, fmt.Errorf("convert: %s is empty", logFileName)
 	}
 
+	// Skip files whose codec or container is on the FFmpeg exclude list.
+	if !w.FFmpegAllowed(f) {
+		format := clean.Log(w.ffmpegExclude.Match(f.MetaData().Codec, f.VideoInfo().VideoCodec, f.FileType().String()))
+		log.Warnf("convert: skipping %s because format %s is on the FFmpeg exclude list", logFileName, format)
+		return nil, fmt.Errorf("convert: format %s is excluded from FFmpeg processing", format)
+	}
+
 	// AVC video filename.
 	var avcName string
 
@@ -42,7 +59,7 @@ func (w *Convert) ToAvc(f *MediaFile, encoder encode.Encoder, noMutex, force boo
 		avcName = fs.VideoMp4.FindFirst(f.FileName(), []string{w.conf.SidecarPath(), fs.PPHiddenPathname}, w.conf.OriginalsPath(), false)
 	} else {
 		// Convert MPEG-2 Transport Stream (M2TS) files to MPEG4 containers.
-		if f.IsM2TS() && w.conf.SidecarWritable() {
+		if f.IsM2TS() && w.conf.SidecarWritable() && !w.conf.InsufficientStorage() {
 			if mp4Name, mp4Err := fs.FileName(f.FileName(), w.conf.SidecarPath(), w.conf.OriginalsPath(), fs.ExtMp4); mp4Err != nil {
 				return nil, fmt.Errorf("convert: %s in %s (remux)", mp4Err, clean.Log(f.RootRelName()))
 			} else if mp4Err = ffmpeg.RemuxFile(f.FileName(), mp4Name, encode.NewRemuxOptions(conf.FFmpegBin(), fs.VideoMp4, false)); mp4Err != nil {
@@ -66,7 +83,7 @@ func (w *Convert) ToAvc(f *MediaFile, encoder encode.Encoder, noMutex, force boo
 	// Return the AVC-encoded video file if it already exists.
 	if mediaFile == nil || err != nil {
 		// Do nothing.
-	} else if mediaFile.IsVideo() {
+	} else if mediaFile.IsVideo() && (!force || !mediaFile.InSidecar()) {
 		// Return existing AVC file.
 		log.Debugf("convert: %s has already been transcoded to MPEG-4 AVC", logFileName)
 		return mediaFile, nil
@@ -75,6 +92,8 @@ func (w *Convert) ToAvc(f *MediaFile, encoder encode.Encoder, noMutex, force boo
 	// Check if the sidecar path is writable, otherwise no new AVC file can be created.
 	if !w.conf.SidecarWritable() {
 		return nil, fmt.Errorf("convert: cannot transcode %s because the sidecar path is not writable", logFileName)
+	} else if w.conf.InsufficientStorage() {
+		return nil, status.ErrInsufficientStorage
 	}
 
 	// Get relative filename for logging.
@@ -158,10 +177,14 @@ func (w *Convert) ToAvc(f *MediaFile, encoder encode.Encoder, noMutex, force boo
 			return nil, fmt.Errorf("convert: failed to remove %s (%s)", clean.Log(RootRelName(avcName)), err)
 		}
 
-		// Try again using software encoder.
-		if encoder != encode.SoftwareAvc {
+		switch {
+		case disk.IsNoSpace(err):
+			// Do not retry on a full disk; surface the cause so the worker can abort the run.
+			return nil, disk.AsInsufficientStorage(err)
+		case encoder != encode.SoftwareAvc:
+			// Try again using software encoder.
 			return w.ToAvc(f, encode.SoftwareAvc, true, false)
-		} else {
+		default:
 			return nil, err
 		}
 	}
@@ -169,8 +192,14 @@ func (w *Convert) ToAvc(f *MediaFile, encoder encode.Encoder, noMutex, force boo
 	// Log filename and transcoding time.
 	log.Infof("%s: created %s [%s]", encoder, filepath.Base(avcName), time.Since(start))
 
-	// Return AVC media file.
-	return NewMediaFile(avcName)
+	// Return AVC media file and keep the successful dewarp projection available to the indexer even
+	// when ExifTool is disabled. Later reindexes infer the same value from source and sidecar paths.
+	avcFile, avcErr := NewMediaFile(avcName)
+	if avcErr == nil && f.DewarpableInsv() {
+		avcFile.SetVisualProjection(projection.Equirectangular)
+	}
+
+	return avcFile, avcErr
 }
 
 // TranscodeToAvcCmd returns the command for converting video files to MPEG-4 AVC.
@@ -191,13 +220,74 @@ func (w *Convert) TranscodeToAvcCmd(f *MediaFile, avcName string, encoder encode
 		return exec.Command(w.conf.ImageMagickBin(), f.FileName(), avcName), false, nil
 	}
 
+	// Complete separate-lens captures are combined before dewarping. Single-file INSV originals are
+	// dewarped only when their decoded frame is already a side-by-side ~2:1 dual-fisheye layout.
+	capture := FindInsta360Capture(f)
+	dewarpPair := capture != nil && capture.ValidPair() && capture.Left.FileName() == f.FileName()
+	dewarp := dewarpPair || f.IsInsv() && f.DualFisheyeLayout()
+
+	if dewarp {
+		encoder = encode.SoftwareAvc
+	}
+
 	// Use FFmpeg to transcode all other media files to AVC.
 	var opt encode.Options
 	if opt, err = w.conf.FFmpegOptions(encoder, w.AvcBitrate(f)); err != nil {
 		return nil, false, fmt.Errorf("convert: failed to transcode %s (%s)", clean.Log(f.BaseName()), err)
-	} else {
-		return ffmpeg.TranscodeCmd(fileName, avcName, opt)
 	}
+
+	if dewarp {
+		opt.V360 = ffmpeg.V360DualFisheyeToEquirect(w.fisheyeFov(f), w.fisheyeRoll(f))
+	}
+
+	if dewarpPair {
+		return ffmpeg.DewarpDualFisheyePairToAvcCmd(capture.Left.FileName(), capture.Right.FileName(), avcName, opt), true, nil
+	}
+
+	return ffmpeg.TranscodeCmd(fileName, avcName, opt)
+}
+
+// fisheyeFov returns the v360 dewarp field of view in degrees for the given fisheye 360° file,
+// preferring a per-camera default and falling back to the configured FFmpegFisheyeFov.
+func (w *Convert) fisheyeFov(f *MediaFile) int {
+	if f != nil {
+		model := f.CameraModel()
+
+		if model == "" && f.DualFisheye() {
+			model = f.Insta360CameraModel()
+		}
+
+		if fov := entity.CameraFisheyeFov(f.CameraMake(), model); fov > 0 {
+			return fov
+		}
+	}
+
+	return w.conf.FFmpegFisheyeFov()
+}
+
+// fisheyeRoll returns a verified spherical roll correction for a compatible Insta360 original.
+func (w *Convert) fisheyeRoll(f *MediaFile) int {
+	if f == nil || !f.DualFisheye() && !f.FisheyeDng() {
+		return 0
+	}
+
+	if capture := FindInsta360Capture(f); capture != nil && capture.ValidPair() {
+		f = capture.Left
+	} else if f.DualFisheye() && !f.DualFisheyeLayout() {
+		return 0
+	}
+
+	model := f.Insta360CameraModel()
+	if f.FisheyeDng() {
+		model = f.CameraModel()
+	}
+	roll := entity.CameraFisheyeRoll(f.CameraMake(), model)
+
+	if roll != 0 {
+		log.Debugf("convert: using v360 profile insta360-one-rs (roll %d) for %s", roll, clean.Log(f.BaseName()))
+	}
+
+	return roll
 }
 
 // AvcBitrate returns the ideal AVC encoding bitrate in megabits per second.

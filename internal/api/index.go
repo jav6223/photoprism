@@ -16,6 +16,7 @@ import (
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
@@ -46,6 +47,16 @@ func StartIndexing(router *gin.RouterGroup) {
 			return
 		}
 
+		// Abort if the storage filesystem is critically low on free space. Indexing only
+		// writes sidecars and thumbnails, so the disk-low check is sufficient here; the
+		// FilesQuota gate used by import/upload/avatar/zip/video does not apply because
+		// indexing catalogs existing files rather than adding to the quota.
+		if _, low, _ := conf.StorageLow(); low {
+			event.AuditErr([]string{ClientIP(c), "session %s", "index files", status.InsufficientStorage}, s.RefID)
+			Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
+			return
+		}
+
 		start := time.Now()
 
 		var frm form.IndexOptions
@@ -60,6 +71,12 @@ func StartIndexing(router *gin.RouterGroup) {
 			}
 
 			AbortBadRequest(c, err)
+			return
+		}
+
+		// Reject index paths that would escape the originals directory.
+		if _, err := photoprism.ResolveIndexPath(conf.OriginalsPath(), frm.Path); err != nil {
+			AbortBadRequest(c)
 			return
 		}
 
@@ -168,9 +185,11 @@ func StartIndexing(router *gin.RouterGroup) {
 
 		elapsed := int(time.Since(start).Seconds())
 
-		msg := i18n.Msg(i18n.MsgIndexingCompletedIn, elapsed)
+		// Report success only if at least one file was indexed.
+		if indexed > 0 {
+			event.SuccessMsg(i18n.MsgIndexingCompletedIn, elapsed)
+		}
 
-		event.Success(msg)
 		event.Publish("index.completed", event.Data{
 			"uid":     indOpt.UID,
 			"action":  indOpt.Action,
@@ -180,7 +199,7 @@ func StartIndexing(router *gin.RouterGroup) {
 
 		UpdateClientConfig()
 
-		c.JSON(http.StatusOK, i18n.Response{Code: http.StatusOK, Msg: msg})
+		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgIndexingCompletedIn, elapsed))
 	})
 }
 

@@ -99,15 +99,15 @@ func (c *dbscanClusterer) WithOnline(o Online) HardClusterer {
 }
 
 func (c *dbscanClusterer) Learn(data [][]float64) error {
-	if len(data) == 0 {
-		return errEmptySet
+	if _, err := dataDims(data); err != nil {
+		return err
 	}
 
 	c.mu.Lock()
 
 	c.l = len(data)
 	c.s = c.numWorkers()
-	c.f = c.l / c.s
+	c.f = partitionSize(c.l, c.s)
 
 	c.d = data
 
@@ -147,6 +147,12 @@ func (c *dbscanClusterer) Guesses() []int {
 }
 
 func (c *dbscanClusterer) Predict(p []float64) int {
+	// Without training data, or for an observation of a different width, there is no
+	// cluster to assign, which this algorithm already labels as noise.
+	if len(c.d) == 0 || len(p) != len(c.d[0]) {
+		return -1
+	}
+
 	var (
 		l int
 		d float64
@@ -303,6 +309,19 @@ func (c *dbscanClusterer) nearestWorker() {
 
 		c.w.Done()
 	}
+}
+
+// partitionSize returns the per-worker scan range size, floored at 1 so the
+// nearest() dispatch loop (which advances the start index by this value) always
+// makes progress and terminates, even if the worker count exceeds the number of
+// data points. The size-based numWorkers buckets keep points >= workers today,
+// so the floor is a defensive guard against future tuning of those buckets.
+func partitionSize(points, workers int) int {
+	if workers < 1 {
+		workers = 1
+	}
+
+	return max(1, points/workers)
 }
 
 func (c *dbscanClusterer) numWorkers() int {

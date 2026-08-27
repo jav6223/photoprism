@@ -285,6 +285,22 @@ func TestCliFlags_SetHidden(t *testing.T) {
 	t.Logf("auth-mode hidden flag after: %#v", cliFlags[1].Hidden())
 }
 
+func TestCliFlags_StorageFreeDisabledByDefault(t *testing.T) {
+	var storageFreeFlag *cli.Float64Flag
+
+	for i := range Flags {
+		if Flags[i].Name() == "storage-free" {
+			storageFreeFlag, _ = Flags[i].Flag.(*cli.Float64Flag)
+			break
+		}
+	}
+
+	if assert.NotNil(t, storageFreeFlag) {
+		assert.Equal(t, DefaultStorageFree, storageFreeFlag.Value)
+		assert.Less(t, storageFreeFlag.Value, 0.0, "storage-free must default to a disabled (negative) value")
+	}
+}
+
 func TestCliFlags_ThemeURLHiddenByDefault(t *testing.T) {
 	var themeURLFlag *CliFlag
 
@@ -306,4 +322,19 @@ func TestCliFlags_ThemeURLHiddenByDefault(t *testing.T) {
 			t.Fatalf("expected PHOTOPRISM_THEME_URL to be hidden in the default flag report")
 		}
 	}
+}
+
+func TestCliFlags_Deprecated(t *testing.T) {
+	t.Run("Deprecated", func(t *testing.T) {
+		assert.True(t, Flags.Deprecated("face-engine"))
+		assert.True(t, Flags.Deprecated("face-engine-threads"))
+	})
+	t.Run("Supported", func(t *testing.T) {
+		assert.False(t, Flags.Deprecated("face-detector"))
+		assert.False(t, Flags.Deprecated("face-model"))
+	})
+	t.Run("Unknown", func(t *testing.T) {
+		assert.False(t, Flags.Deprecated("nonexistent"))
+		assert.False(t, Flags.Deprecated(""))
+	})
 }

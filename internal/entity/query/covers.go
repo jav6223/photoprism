@@ -12,6 +12,7 @@ import (
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/media"
 )
 
@@ -45,7 +46,7 @@ func UpdateAlbumManualCovers(albums ...entity.Album) (err error) {
 	condition := gorm.Expr("album_type = ? AND thumb_src = ?", entity.AlbumManual, entity.SrcAuto)
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		res = Db().Exec(`UPDATE albums LEFT JOIN (
 	    	SELECT p2.album_uid, f.file_hash FROM files f, (
 	        	SELECT pa.album_uid, max(p.id) AS photo_id FROM photos p
@@ -54,7 +55,7 @@ func UpdateAlbumManualCovers(albums ...entity.Album) (err error) {
 	        	GROUP BY pa.album_uid) p2 WHERE p2.photo_id = f.photo_id AND f.file_primary = 1 AND f.file_error = '' AND f.file_type IN (?)
 			) b ON b.album_uid = albums.album_uid
 		SET thumb = b.file_hash WHERE ?`, media.PreviewExpr, condition)
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		res = Db().Table(entity.Album{}.TableName()).
 			UpdateColumn("thumb", gorm.Expr(`(
 		SELECT f.file_hash FROM files f 
@@ -108,7 +109,7 @@ func UpdateAlbumFolderCovers(albums ...entity.Album) (err error) {
 	condition := gorm.Expr("album_type = ? AND thumb_src = ?", entity.AlbumFolder, entity.SrcAuto)
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		res = Db().Exec(`UPDATE albums LEFT JOIN (
 		SELECT p2.photo_path, f.file_hash FROM files f, (
 			SELECT p.photo_path, max(p.id) AS photo_id FROM photos p
@@ -116,7 +117,7 @@ func UpdateAlbumFolderCovers(albums ...entity.Album) (err error) {
 			GROUP BY p.photo_path) p2 WHERE p2.photo_id = f.photo_id AND f.file_primary = 1 AND f.file_error = '' AND f.file_type IN (?)
 			) b ON b.photo_path = albums.album_path
 		SET thumb = b.file_hash WHERE ?`, media.PreviewExpr, condition)
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		res = Db().Table(entity.Album{}.TableName()).UpdateColumn("thumb", gorm.Expr(`(
 		SELECT f.file_hash FROM files f,(
 			SELECT p.photo_path, max(p.id) AS photo_id FROM photos p
@@ -171,7 +172,7 @@ func UpdateAlbumMonthCovers(albums ...entity.Album) (err error) {
 	condition := gorm.Expr("album_type = ? AND thumb_src = ?", entity.AlbumMonth, entity.SrcAuto)
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		res = Db().Exec(`UPDATE albums LEFT JOIN (
 		SELECT p2.photo_year, p2.photo_month, f.file_hash FROM files f, (
 			SELECT p.photo_year, p.photo_month, max(p.id) AS photo_id FROM photos p
@@ -179,7 +180,7 @@ func UpdateAlbumMonthCovers(albums ...entity.Album) (err error) {
 			GROUP BY p.photo_year, p.photo_month) p2 WHERE p2.photo_id = f.photo_id AND f.file_primary = 1 AND f.file_error = '' AND f.file_type IN (?)
 			) b ON b.photo_year = albums.album_year AND b.photo_month = albums.album_month
 		SET thumb = b.file_hash WHERE ?`, media.PreviewExpr, condition)
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		res = Db().Table(entity.Album{}.TableName()).UpdateColumn("thumb", gorm.Expr(`(
 		SELECT f.file_hash FROM files f,(
 			SELECT p.photo_year, p.photo_month, max(p.id) AS photo_id FROM photos p
@@ -219,11 +220,7 @@ func UpdateAlbumCovers(albums ...entity.Album) (err error) {
 			return err
 		}
 
-		if err = UpdateAlbumMonthCovers(); err != nil {
-			return err
-		}
-
-		return nil
+		return UpdateAlbumMonthCovers()
 	}
 
 	var manualAlbums, folderAlbums, monthAlbums []entity.Album
@@ -299,7 +296,8 @@ func refreshAlbumCover(album entity.Album) error {
 
 // refreshManualAlbumCover updates the cover for a single manual album.
 func refreshManualAlbumCover(album entity.Album) error {
-	file, err := AlbumCoverByUID(album.AlbumUID, false)
+	// Excludes private pictures, matching UpdateAlbumManualCovers.
+	file, err := AlbumCoverByUID(album.AlbumUID, true)
 	if err != nil {
 		if strings.Contains(err.Error(), "no cover") {
 			return nil
@@ -322,7 +320,7 @@ func refreshFolderAlbumCover(album entity.Album) error {
 	}
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		res := Db().Exec(`UPDATE albums LEFT JOIN (
 		SELECT p2.photo_path, f.file_hash FROM files f, (
 			SELECT p.photo_path, max(p.id) AS photo_id FROM photos p
@@ -338,7 +336,7 @@ func refreshFolderAlbumCover(album entity.Album) error {
 		)
 
 		return res.Error
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		res := Db().Table(entity.Album{}.TableName()).
 			Where("album_uid = ? AND album_type = ? AND thumb_src = ?", album.AlbumUID, entity.AlbumFolder, entity.SrcAuto).
 			UpdateColumn("thumb", gorm.Expr(`(
@@ -366,7 +364,7 @@ func refreshMonthAlbumCover(album entity.Album) error {
 	}
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		res := Db().Exec(`UPDATE albums LEFT JOIN (
 		SELECT p2.photo_year, p2.photo_month, f.file_hash FROM files f, (
 			SELECT p.photo_year, p.photo_month, max(p.id) AS photo_id FROM photos p
@@ -383,7 +381,7 @@ func refreshMonthAlbumCover(album entity.Album) error {
 		)
 
 		return res.Error
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		res := Db().Table(entity.Album{}.TableName()).
 			Where("album_uid = ? AND album_type = ? AND thumb_src = ?", album.AlbumUID, entity.AlbumMonth, entity.SrcAuto).
 			UpdateColumn("thumb", gorm.Expr(`(
@@ -416,7 +414,7 @@ func UpdateLabelCovers() (err error) {
 	condition := gorm.Expr("thumb_src = ?", entity.SrcAuto)
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		res = Db().Exec(`UPDATE labels LEFT JOIN (
 		SELECT p2.label_id, f.file_hash FROM files f, (
 			SELECT pl.label_id as label_id, max(p.id) AS photo_id FROM photos p
@@ -432,7 +430,7 @@ func UpdateLabelCovers() (err error) {
 			) p2 WHERE p2.photo_id = f.photo_id AND f.file_primary = 1 AND f.file_error = '' AND f.file_type IN (?) AND f.file_missing = 0
 		) b ON b.label_id = labels.id
 		SET thumb = b.file_hash WHERE ?`, media.PreviewExpr, condition)
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		res = Db().Table(entity.Label{}.TableName()).UpdateColumn("thumb", gorm.Expr(`(
 		SELECT f.file_hash FROM files f 
 			JOIN photos_labels pl ON pl.label_id = labels.id AND pl.photo_id = f.photo_id AND pl.uncertainty < 100
@@ -471,14 +469,14 @@ func UpdateLabelCovers() (err error) {
 	return err
 }
 
-// UpdateSubjectCovers updates subject cover thumbs.
+// UpdateSubjectCovers updates subject cover thumbs, preferring a marker whose subject automatic
+// clustering did not assign, and then the largest and most confident face.
 func UpdateSubjectCovers(public bool) (err error) {
 	mutex.Index.Lock()
 	defer mutex.Index.Unlock()
 
 	start := time.Now()
 
-	var res *gorm.DB
 	var photosJoin *gorm.SqlExpr
 
 	// Use faces tagged on private pictures as cover images?
@@ -492,41 +490,28 @@ func UpdateSubjectCovers(public bool) (err error) {
 
 	condition := gorm.Expr("subjects.subj_type = ? AND thumb_src = ?", entity.SubjPerson, entity.SrcAuto)
 
-	// Compose SQL update query.
-	switch DbDialect() {
-	case MySQL:
-		res = Db().Exec(`UPDATE subjects LEFT JOIN (
-    	SELECT m.subj_uid, m.q, MAX(m.thumb) AS marker_thumb
-    		FROM markers m
-    	    JOIN files f ON f.file_uid = m.file_uid AND f.deleted_at IS NULL
-			JOIN photos p ON ?
-			WHERE m.subj_uid <> '' AND m.subj_uid IS NOT NULL
-			  AND m.marker_invalid = 0 AND m.thumb IS NOT NULL AND m.thumb <> ''
-			GROUP BY m.subj_uid, m.q
-			) b ON b.subj_uid = subjects.subj_uid
-		SET thumb = marker_thumb WHERE ?`,
-			photosJoin,
-			condition,
-		)
-	case SQLite3:
-		// from := gorm.Expr(fmt.Sprintf("%s m WHERE m.subj_uid = %s.subj_uid ", markerTable, subjTable))
-		res = Db().Table(entity.Subject{}.TableName()).UpdateColumn("thumb",
-			gorm.Expr(`(
-                SELECT m.thumb
-					FROM markers m 
-					JOIN files f ON f.file_uid = m.file_uid AND f.deleted_at IS NULL
-					JOIN photos p ON ?
-					WHERE m.subj_uid = subjects.subj_uid AND m.thumb <> ''
-					ORDER BY m.subj_src DESC, m.q DESC LIMIT 1
-				) WHERE ?`,
-				photosJoin,
-				condition,
-			),
-		)
-	default:
-		log.Warnf("sql: unsupported dialect %s", DbDialect())
+	if dialect := DbDialect(); dialect != dsn.DriverMySQL && dialect != dsn.DriverSQLite3 {
+		log.Warnf("sql: unsupported dialect %s", dialect)
 		return nil
 	}
+
+	// One statement for both dialects, so a library cannot get a different cover per backend.
+	// The uid guard keeps an empty subject uid from correlating against every unassigned marker,
+	// and a person left without an eligible marker gets no cover rather than a null one.
+	res := Db().Exec(`UPDATE subjects SET thumb = COALESCE((
+		SELECT m.thumb FROM markers m
+			JOIN files f ON f.file_uid = m.file_uid AND f.deleted_at IS NULL
+			JOIN photos p ON ?
+			WHERE m.subj_uid = subjects.subj_uid AND m.subj_uid <> ''
+			  AND m.marker_type = ? AND m.marker_invalid = 0 AND m.thumb <> ''
+			ORDER BY (m.subj_src <> ?) DESC, m.size DESC, m.score DESC, m.marker_uid
+			LIMIT 1), '')
+		WHERE ?`,
+		photosJoin,
+		entity.MarkerFace,
+		entity.SrcAuto,
+		condition,
+	)
 
 	err = res.Error
 

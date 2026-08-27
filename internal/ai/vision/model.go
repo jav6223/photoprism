@@ -29,6 +29,7 @@ var (
 	VersionLatest = "latest"
 	VersionMobile = "mobile"
 	Version3B     = "3b"
+	VersionCloud  = "cloud"
 )
 
 // Model represents a computer vision model configuration.
@@ -43,6 +44,7 @@ type Model struct {
 	System        string                `yaml:"System,omitempty" json:"system,omitempty"`
 	Prompt        string                `yaml:"Prompt,omitempty" json:"prompt,omitempty"`
 	Format        string                `yaml:"Format,omitempty" json:"format,omitempty"`
+	Normalize     NormalizeType         `yaml:"Normalize,omitempty" json:"normalize,omitempty"` // "single-word", "phrase", or "false"
 	Schema        string                `yaml:"Schema,omitempty" json:"schema,omitempty"`
 	SchemaFile    string                `yaml:"SchemaFile,omitempty" json:"schemaFile,omitempty"`
 	Resolution    int                   `yaml:"Resolution,omitempty" json:"resolution,omitempty"`
@@ -52,7 +54,7 @@ type Model struct {
 	Path          string                `yaml:"Path,omitempty" json:"-"`
 	Disabled      bool                  `yaml:"Disabled,omitempty" json:"disabled,omitempty"`
 	classifyModel *classify.Model
-	faceModel     *face.Model
+	faceModel     face.Embedder
 	nsfwModel     *nsfw.Model
 	schemaOnce    sync.Once
 	schema        string
@@ -69,9 +71,11 @@ func (m *Model) GetModel() (model, name, version string) {
 		return "", "", ""
 	}
 
-	// Normalise the configured values.
-	name = clean.TypeLower(m.Name)
-	version = clean.TypeLowerDash(m.Version)
+	// Sanitize the configured values without lowercasing: upstream catalogs
+	// (Ollama tags, Hugging Face IDs served by OpenAI-compatible endpoints)
+	// match identifiers verbatim, so case must round-trip from vision.yml.
+	name = clean.Type(m.Name)
+	version = clean.Type(m.Version)
 
 	// Build a base name from the highest-priority override:
 	// 1) Service-specific override (expanded for env vars)
@@ -82,7 +86,7 @@ func (m *Model) GetModel() (model, name, version string) {
 	case serviceModel != "":
 		name = serviceModel
 	case strings.TrimSpace(m.Model) != "":
-		name = clean.TypeLower(m.Model)
+		name = clean.Type(m.Model)
 	}
 
 	// Return if no model is configured.
@@ -110,6 +114,31 @@ func (m *Model) GetModel() (model, name, version string) {
 	default:
 		return name, name, version
 	}
+}
+
+// IsCloud reports whether the model runs as a cloud service rather than on local hardware.
+// Each signal comes from the model, never from an engine-wide default, so a configuration that
+// reaches both a local instance and a cloud service classifies each entry on its own.
+func (m *Model) IsCloud() bool {
+	if m == nil {
+		return false
+	}
+
+	_, name, version := m.GetModel()
+
+	// The "cloud" tag marks a model even when a local instance proxies the request.
+	if version == VersionCloud {
+		return true
+	}
+
+	// OpenAI-compatible local servers run open-weight models under their own names.
+	if m.Engine == openai.EngineName && openai.IsCloudModel(name) {
+		return true
+	}
+
+	uri, _ := m.Endpoint()
+
+	return ollama.IsCloudUrl(uri)
 }
 
 // IsDefault reports whether the model refers to one of the built-in defaults.
@@ -167,6 +196,7 @@ func (m *Model) ApplyService(apiRequest *ApiRequest) {
 	if m.Engine == openai.EngineName {
 		apiRequest.Org = m.Service.EndpointOrg()
 		apiRequest.Project = m.Service.EndpointProject()
+		apiRequest.Tier = m.Service.EndpointTier()
 	}
 
 	if think := m.Service.EndpointThink(); think != "" {
@@ -503,6 +533,10 @@ func (m *Model) ApplyEngineDefaults() {
 		if strings.TrimSpace(m.Service.Key) == "" && info.DefaultKey != "" {
 			m.Service.Key = info.DefaultKey
 		}
+
+		if strings.TrimSpace(m.Service.Think) == "" && info.DefaultThink != "" {
+			m.Service.Think = info.DefaultThink
+		}
 	}
 
 	m.Engine = engine
@@ -681,9 +715,44 @@ func (m *Model) ClassifyModel() *classify.Model {
 
 // FaceModel returns the matching face recognition model instance, if any. Nil
 // receivers return nil.
-func (m *Model) FaceModel() *face.Model {
+func (m *Model) FaceModel() face.Embedder {
 	if m == nil {
 		return nil
+	}
+
+	// FACE_MODEL=none turns embedding generation off, so no model may be loaded even
+	// when vision.yml still schedules face processing to detect regions.
+	if face.EmbeddingsDisabled() {
+		return nil
+	}
+
+	// A library whose stored vectors were produced by another model has to be migrated
+	// rather than added to, so nothing is embedded until it is. Detection keeps running,
+	// because DetectFaces returns its markers instead of failing when this hands out none.
+	if face.EmbeddingsBlocked() {
+		return nil
+	}
+
+	return m.faceEmbedder()
+}
+
+// MigrationFaceModel returns the face embedding model instance for a migration, the one caller
+// the gates above do not apply to: it writes every vector in its own target's space, so a gate
+// against mixing spaces would only stop the work that resolves the mismatch.
+func (m *Model) MigrationFaceModel() face.Embedder {
+	if m == nil {
+		return nil
+	}
+
+	return m.faceEmbedder()
+}
+
+// faceEmbedder returns the face embedding model instance, loading it when needed.
+func (m *Model) faceEmbedder() face.Embedder {
+	// An ONNX embedding model selected with FACE_MODEL takes precedence: vision.yml
+	// only schedules when faces are processed, while the model itself is per instance.
+	if embedder := face.ActiveEmbedder(); embedder != nil {
+		return embedder
 	}
 
 	// Use mutex to prevent models from being loaded and
@@ -702,7 +771,7 @@ func (m *Model) FaceModel() *face.Model {
 		return nil
 	case FacenetModel.Name, "facenet":
 		// Load and initialize the Nasnet image classification model.
-		if model := face.NewModel(GetFacenetModelPath(), GetCachePath(), m.Resolution, m.TensorFlow, m.Disabled); model == nil {
+		if model := face.NewModel(face.ModelFaceNet, GetFacenetModelPath(), GetCachePath(), m.Resolution, m.TensorFlow, m.Disabled); model == nil {
 			return nil
 		} else if err := model.Init(); err != nil {
 			log.Errorf("vision: %s (init %s)", err, m.Path)
@@ -711,6 +780,14 @@ func (m *Model) FaceModel() *face.Model {
 			m.faceModel = model
 		}
 	default:
+		// FACE_MODEL is authoritative for which model produces embeddings, and every
+		// supported one needs code that knows its preprocessing contract, so there is
+		// nothing useful to configure per installation here. Loading it anyway keeps an
+		// existing vision.yml working, but its vectors are recorded under the configured
+		// model's name rather than this one.
+		log.Warnf("vision: custom face model %s in vision.yml is deprecated, select a model with FACE_MODEL instead",
+			clean.Log(m.Name))
+
 		// Set model path from model name if no path is configured.
 		if m.Path == "" {
 			m.Path = clean.Path(clean.TypeLowerUnderscore(m.Name))
@@ -726,7 +803,7 @@ func (m *Model) FaceModel() *face.Model {
 		}
 
 		// Try to load custom model based on the configuration values.
-		if model := face.NewModel(GetModelPath(m.Path), GetCachePath(), m.Resolution, m.TensorFlow, m.Disabled); model == nil {
+		if model := face.NewModel(face.NormalizeModelName(m.Name), GetModelPath(m.Path), GetCachePath(), m.Resolution, m.TensorFlow, m.Disabled); model == nil {
 			return nil
 		} else if err := model.Init(); err != nil {
 			log.Errorf("vision: %s (init %s)", err, m.Path)
@@ -805,12 +882,20 @@ func (m *Model) NsfwModel() *nsfw.Model {
 	return m.nsfwModel
 }
 
-// Clone returns a shallow copy of the model. Nil receivers return nil.
+// Clone returns a copy of the model with its own lazily derived state. Nil receivers return nil.
+//
+// The schema is reset rather than carried over, so a clone derives one from its own fields instead
+// of inheriting whatever was computed for the model it came from.
 func (m *Model) Clone() *Model {
 	if m == nil {
 		return nil
 	}
 
-	c := *m //nolint:govet // Model contains sync.Once; shallow copy used for reporting
+	//nolint:govet // Copying the guard is safe because the copy is reset before it is used.
+	c := *m
+
+	c.schemaOnce = sync.Once{}
+	c.schema = ""
+
 	return &c
 }

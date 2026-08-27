@@ -18,6 +18,8 @@ func TestConfig_FFmpegEncoder(t *testing.T) {
 	assert.Equal(t, encode.SoftwareAvc, c.FFmpegEncoder())
 	c.options.FFmpegEncoder = "intel"
 	assert.Equal(t, encode.IntelAvc, c.FFmpegEncoder())
+	c.options.FFmpegEncoder = "vulkan"
+	assert.Equal(t, encode.VulkanAvc, c.FFmpegEncoder())
 	c.options.FFmpegEncoder = "xxx"
 	assert.Equal(t, encode.SoftwareAvc, c.FFmpegEncoder())
 	c.options.FFmpegEncoder = ""
@@ -49,6 +51,23 @@ func TestConfig_FFmpegBitrate(t *testing.T) {
 	assert.Equal(t, 800, c.FFmpegBitrate())
 }
 
+func TestConfig_FFmpegFisheyeFov(t *testing.T) {
+	c := NewConfig(CliTestContext())
+	assert.Equal(t, encode.DefaultFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 0
+	assert.Equal(t, encode.DefaultFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 10
+	assert.Equal(t, encode.MinFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 500
+	assert.Equal(t, encode.MaxFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 190
+	assert.Equal(t, 190, c.FFmpegFisheyeFov())
+}
+
 func TestConfig_FFmpegSize(t *testing.T) {
 	c := NewConfig(CliTestContext())
 	assert.Equal(t, 4096, c.FFmpegSize())
@@ -57,7 +76,7 @@ func TestConfig_FFmpegSize(t *testing.T) {
 	assert.Equal(t, 4096, c.FFmpegSize())
 
 	c.options.FFmpegSize = -1
-	assert.Equal(t, 7680, c.FFmpegSize())
+	assert.Equal(t, 15360, c.FFmpegSize())
 
 	c.options.FFmpegSize = 10
 	assert.Equal(t, 720, c.FFmpegSize())
@@ -73,6 +92,9 @@ func TestConfig_FFmpegSize(t *testing.T) {
 
 	c.options.FFmpegSize = 8640
 	assert.Equal(t, thumb.Sizes[thumb.Fit7680].Width, c.FFmpegSize())
+
+	c.options.FFmpegSize = 15360
+	assert.Equal(t, thumb.Sizes[thumb.Fit15360].Width, c.FFmpegSize())
 }
 
 func TestConfig_FFmpegQuality(t *testing.T) {
@@ -140,6 +162,24 @@ func TestConfig_FFmpegMapVideo(t *testing.T) {
 func TestConfig_FFmpegMapAudio(t *testing.T) {
 	c := NewConfig(CliTestContext())
 	assert.Equal(t, encode.DefaultMapAudio, c.FFmpegMapAudio())
+}
+
+func TestConfig_FFmpegExclude(t *testing.T) {
+	c := NewConfig(CliTestContext())
+	assert.Equal(t, "magy", c.FFmpegExclude().String())
+
+	// String() returns formats sorted alphabetically; codec names are canonicalized.
+	c.options.FFmpegExclude = "magicyuv, hap"
+	assert.Equal(t, "hap, magy", c.FFmpegExclude().String())
+
+	excluded := c.FFmpegExclude()
+	assert.True(t, excluded.Contains("magicyuv"))
+	assert.True(t, excluded.Contains("hap"))
+	assert.False(t, excluded.Contains("avc1"))
+
+	c.options.FFmpegExclude = ""
+	assert.Equal(t, "", c.FFmpegExclude().String())
+	assert.False(t, c.FFmpegExclude().Contains("magicyuv"))
 }
 
 func TestConfig_FFmpegOptions(t *testing.T) {

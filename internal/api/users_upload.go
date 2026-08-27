@@ -22,6 +22,7 @@ import (
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
 	"github.com/photoprism/photoprism/pkg/i18n"
 	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/media"
@@ -68,7 +69,7 @@ func UploadUserFiles(router *gin.RouterGroup) {
 		}
 
 		// Abort if there is not enough free storage to upload new files.
-		if conf.FilesQuotaReached() {
+		if conf.InsufficientStorage() {
 			event.AuditErr([]string{ClientIP(c), "session %s", "upload files", status.InsufficientStorage}, s.RefID)
 			Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
 			return
@@ -142,6 +143,15 @@ func UploadUserFiles(router *gin.RouterGroup) {
 			// Save uploaded file in the user upload path.
 			if err = c.SaveUploadedFile(file, destName); err != nil {
 				log.Debugf("upload: %s in %s", clean.Error(err), clean.Log(baseName))
+
+				// Report a disk-full write failure as insufficient storage so the cause is clear.
+				if disk.IsNoSpace(err) {
+					disk.FlushFree()
+					event.AuditErr([]string{ClientIP(c), "session %s", "upload files", status.InsufficientStorage}, s.RefID)
+					Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
+					return
+				}
+
 				log.Errorf("upload: failed to save %s", clean.Log(baseName))
 				Abort(c, http.StatusBadRequest, i18n.ErrUploadFailed)
 				return
@@ -245,11 +255,11 @@ func UploadUserFiles(router *gin.RouterGroup) {
 		elapsed := int(time.Since(start).Seconds())
 
 		// Log number of successfully uploaded files.
-		msg := i18n.Msg(i18n.MsgFilesUploadedIn, len(uploads), elapsed)
+		resp := i18n.NewResponse(http.StatusOK, i18n.MsgFilesUploadedIn, len(uploads), elapsed)
 
-		log.Info(msg)
+		log.Info(resp.LowerString())
 
-		c.JSON(http.StatusOK, i18n.Response{Code: http.StatusOK, Msg: msg})
+		c.JSON(http.StatusOK, resp)
 	})
 }
 
@@ -387,9 +397,7 @@ func ProcessUserUpload(router *gin.RouterGroup) {
 		elapsed := int(time.Since(start).Seconds())
 
 		// Show success message.
-		msg := i18n.Msg(i18n.MsgUploadProcessed)
-
-		event.Success(msg)
+		event.SuccessMsg(i18n.MsgUploadProcessed)
 		event.Publish("import.completed", event.Data{"uid": opt.UID, "path": uploadPath, "seconds": elapsed})
 		event.Publish("index.completed", event.Data{"uid": opt.UID, "path": uploadPath, "seconds": elapsed})
 		event.Publish("upload.completed", event.Data{"uid": opt.UID, "path": uploadPath, "seconds": elapsed})
@@ -398,7 +406,7 @@ func ProcessUserUpload(router *gin.RouterGroup) {
 		for _, album := range opt.Albums {
 			if a := entity.FindAlbum(entity.AlbumSearch(album, album, entity.AlbumManual)); a != nil {
 				SaveAlbumYaml(a)
-				PublishAlbumEvent(StatusUpdated, a.AlbumUID, c)
+				PublishAlbumEvent(StatusUpdated, a.AlbumUID)
 			}
 		}
 
@@ -410,6 +418,6 @@ func ProcessUserUpload(router *gin.RouterGroup) {
 			log.Warnf("upload: %s (update covers)", coversErr)
 		}
 
-		c.JSON(http.StatusOK, i18n.Response{Code: http.StatusOK, Msg: msg})
+		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgUploadProcessed))
 	})
 }

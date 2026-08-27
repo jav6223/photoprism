@@ -5,6 +5,15 @@ import { getAppSessionStorage, getAppStorage } from "common/storage";
 const TouchStartEvent = "touchstart";
 const TouchMoveEvent = "touchmove";
 
+// Selector for the document's viewport meta tag.
+const ViewportMetaSelector = 'meta[name="viewport"]';
+
+// Viewport content that disables the browser's native pinch-zoom of the whole page.
+const ViewportNoZoom = "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no";
+
+// Token in a viewport content string indicating native zoom is already disabled.
+const ViewportNoZoomToken = "user-scalable=no";
+
 // True if debug and/or trace logs should be recorded.
 const debug = window.__CONFIG__?.debug;
 const trace = window.__CONFIG__?.trace;
@@ -102,24 +111,6 @@ export function getScrollbarWidth() {
   }
 
   return window.innerWidth - body.offsetWidth;
-}
-
-// Checks if the element is a button.
-export function isInputElement(el) {
-  if (!el) {
-    return false;
-  }
-
-  return el instanceof HTMLButtonElement;
-}
-
-// Checks if the element is an image, video, or canvas.
-export function isMediaElement(el) {
-  if (!el) {
-    return false;
-  }
-
-  return el instanceof HTMLImageElement || el instanceof HTMLVideoElement || el instanceof HTMLCanvasElement;
 }
 
 // Component refs supported for automatic focus element detection.
@@ -366,20 +357,48 @@ export function setFocus(el, selector, scroll) {
   return false;
 }
 
-// Prevents the default navigation touch gestures.
-export function preventNavigationTouchEvent(ev) {
-  if (ev instanceof TouchEvent && ev.cancelable) {
-    // console.log(`${ev.type} @ ${ev.touches[0].clientX.toString()} x ${ev.touches[0].clientY.toString()}`, ev.target);
-    if (ev.type === TouchStartEvent && (isMediaElement(ev.target) || ev.touches[0].clientX <= 30)) {
-      if (window.innerHeight - ev.touches[0].clientY > 128 || ev.touches[0].clientX <= 30) {
-        ev.preventDefault();
-        // console.log(`prevented ${ev.type} @ ${ev.touches[0].clientX.toString()} x ${ev.touches[0].clientY.toString()}`);
-      }
-    } else if (ev.type === TouchMoveEvent && !isInputElement(ev.target)) {
-      ev.preventDefault();
-      // console.log(`prevented ${ev.type} @ ${ev.touches[0].clientX.toString()} x ${ev.touches[0].clientY.toString()}`);
-    }
+// Edge band (px) at the viewport sides/top where iOS swipe-back and browser
+// pull-to-refresh gestures originate; touches inside it are treated as nav gestures.
+const NavGestureEdgeBand = 30;
+
+// Tap-actionable elements exempted from edge-band preventDefault so buttons,
+// inputs, and links inside an edge band stay reliable on touch devices.
+const InteractiveTargetSelector = 'button, input, textarea, select, a[href], [role="button"]';
+
+// isInteractiveTarget reports whether the touch target is (or sits inside) a tappable widget.
+function isInteractiveTarget(target) {
+  if (!target || typeof target.closest !== "function") {
+    return false;
   }
+  return target.closest(InteractiveTargetSelector) !== null;
+}
+
+// preventNavigationTouchEvent suppresses iOS swipe-back, browser pull-to-refresh, and
+// accidental horizontal navigation while the lightbox is active. Scoped to edge bands
+// only — inner-area touches and taps on interactive widgets pass through. Runs in the
+// capture phase (see _preventNavOptions) so overlays that stopPropagation to own their
+// gestures, like the PDF viewer, can't defeat it.
+export function preventNavigationTouchEvent(ev) {
+  if (!(ev instanceof TouchEvent) || !ev.cancelable) {
+    return;
+  }
+  if (ev.type !== TouchStartEvent && ev.type !== TouchMoveEvent) {
+    return;
+  }
+  const touch = ev.touches[0] || (ev.changedTouches && ev.changedTouches[0]);
+  if (!touch) {
+    return;
+  }
+  const atLeftEdge = touch.clientX <= NavGestureEdgeBand;
+  const atRightEdge = touch.clientX >= window.innerWidth - NavGestureEdgeBand;
+  const atTopEdge = touch.clientY <= NavGestureEdgeBand;
+  if (!atLeftEdge && !atRightEdge && !atTopEdge) {
+    return;
+  }
+  if (isInteractiveTarget(ev.target)) {
+    return;
+  }
+  ev.preventDefault();
 }
 
 // Returns a random string that can be used as an identifier.
@@ -397,6 +416,7 @@ export class View {
     this.scopes = [];
     this.hideScrollbar = false;
     this.preventNavigation = false;
+    this.savedViewportContent = "";
     this.focusScopes = new Map();
 
     // Tracks the most recent history position and derived navigation direction so components can
@@ -416,9 +436,10 @@ export class View {
     this._onFocusOutListener = this.onDocumentFocusOut.bind(this);
     document.addEventListener("focusout", this._onFocusOutListener);
 
-    // Options used when preventing navigation touch gestures; keep a stable
-    // object reference so add/removeEventListener calls can match on all browsers.
-    this._preventNavOptions = { passive: false };
+    // Guard listener options; a stable reference lets add/removeEventListener match.
+    // capture:true so a descendant that stops touch propagation (e.g. the PDF viewer's
+    // @touchstart.stop) can't defeat the window-level guard.
+    this._preventNavOptions = { passive: false, capture: true };
 
     if (trace) {
       // Store trace handlers so they can be removed later if needed.
@@ -518,12 +539,9 @@ export class View {
       return false;
     }
 
-    // When debug mode is enabled, write logs to a collapsed group in the browser console:
-    // https://developer.mozilla.org/en-US/docs/Web/API/console/groupCollapsed_static
+    // Write debug logs to a collapsed group with a recognizable purple header.
     if (debug) {
       const scope = this.scopes.map((s) => `${s?.$options?.name} #${s?.$?.uid.toString()}`).join(" › ");
-      // To make them easy to recognize, the collapsed view logs are displayed
-      // in the browser console with bold white text on a purple background.
       console.groupCollapsed(`%c${scope}`, "background: #502A85; color: white; padding: 3px 5px; border-radius: 8px; font-weight: bold;");
       console.log("data:", toRaw(c?.$data));
     }
@@ -550,6 +568,7 @@ export class View {
     let hideScrollbar = this.len() > 2 ? this.hideScrollbar : false;
     let disableScrolling = false;
     let disableNavigationGestures = false;
+    let disableViewportZoom = false;
     let preventNavigation = uid > 0 && !name.startsWith("PPage");
 
     switch (name) {
@@ -577,6 +596,7 @@ export class View {
         hideScrollbar = true;
         disableScrolling = true;
         disableNavigationGestures = true;
+        disableViewportZoom = true;
         preventNavigation = true;
         break;
     }
@@ -656,6 +676,14 @@ export class View {
       }
     }
 
+    // Lock native pinch-zoom while a flagged overlay is active, restore it otherwise.
+    // Both helpers are idempotent, so re-applying the same state is a no-op.
+    if (disableViewportZoom) {
+      this.disableNativeZoom();
+    } else {
+      this.restoreNativeZoom();
+    }
+
     if (debug) {
       console.groupEnd();
     }
@@ -724,40 +752,11 @@ export class View {
       return;
     }
 
-    // Sibling-menu gate: components like v-autocomplete, v-select, and v-combobox
-    // teleport their dropdown menus to <body>, so the menu's overlay element is
-    // a sibling of the dialog's overlay (both children of the same parent),
-    // NOT a descendant of the dialog. When the user opens such a menu, focus
-    // moves from the input (inside the dialog) to a list item (inside the
-    // sibling menu overlay) — the `root.contains(next)` check above does not
-    // cover that case, so without this gate the focus trap would yank focus
-    // back to the dialog and immediately close the menu.
-    //
-    // We only skip the trap when ALL of the following hold:
-    //   - the dialog is itself wrapped in a Vuetify overlay (v-dialog)
-    //   - relatedTarget points into a `.v-overlay__content` (the menu's content
-    //     wrapper) — anything else is treated as focus genuinely leaving the
-    //     dialog and gets re-trapped
-    //   - that overlay is a `.v-menu` (excludes nested v-dialogs and other
-    //     overlay types where re-trapping is still desired)
-    //   - the menu overlay is a sibling of the dialog overlay (same parent),
-    //     confirming both were teleported to the same root and that the menu
-    //     belongs to the same modal stack
-    //   - the menu is currently visible (`display !== "none"` — Vuetify uses
-    //     `v-show` to hide closed menus while keeping them mounted)
-    //   - relatedTarget really is inside that menu's content
-    //
-    // History note: Vuetify 3.12.3 added an `onFocusout` handler to
-    // VAutocomplete/VSelect/VCombobox that flips `isFocused=false` whenever
-    // relatedTarget is outside the textfield, which closed long autocomplete
-    // menus on open (issue #5538, Vuetify PR fixing #22697). PhotoPrism is
-    // pinned to Vuetify 3.12.2 to avoid that regression — see
-    // `frontend/package.json` and `frontend/CODEMAP.md`. If the pin is ever
-    // lifted to >=3.12.3, this gate alone is NOT sufficient: that bug fires
-    // before the user ever interacts with the menu. Vuetify 3.12.2 itself has
-    // an unrelated upstream caveat (issue #22828, v-select @blur firing on
-    // open); PhotoPrism is not affected because we don't bind @blur to
-    // v-select anywhere.
+    // Sibling-menu gate: v-autocomplete / v-select / v-combobox teleport their
+    // dropdown to <body>, so focus moving from the input into a list item exits
+    // the dialog's DOM subtree and would otherwise be yanked back by the trap,
+    // immediately closing the menu. Skip the trap only when relatedTarget sits
+    // inside a visible .v-menu overlay that is a sibling of this dialog's overlay.
     const dialogOverlay = root.closest(".v-overlay");
     const menuOverlayContent = next instanceof HTMLElement ? next.closest(".v-overlay__content") : null;
 
@@ -840,6 +839,47 @@ export class View {
   // Gives focus to the specified HTML element, or the first element that matches the specified selector string.
   focus(el, selector, scroll) {
     return setFocus(el, selector, scroll);
+  }
+
+  // disableNativeZoom locks the viewport so the browser can't pinch-zoom the whole page
+  // while an overlay (e.g. the lightbox) handles zoom itself; restoreNativeZoom restores
+  // the saved content. Idempotent; assumes one active overlay (savedViewportContent is
+  // app-global), which View.apply() upholds by locking only for the top-of-stack view.
+  disableNativeZoom() {
+    if (this.savedViewportContent) {
+      return;
+    }
+
+    const viewport = document.querySelector(ViewportMetaSelector);
+
+    if (!viewport) {
+      return;
+    }
+
+    const content = viewport.getAttribute("content") || "";
+
+    // Nothing to restore if the base viewport already blocks zoom (e.g. the Zoom setting is off).
+    if (content.includes(ViewportNoZoomToken)) {
+      return;
+    }
+
+    this.savedViewportContent = content;
+    viewport.setAttribute("content", ViewportNoZoom);
+  }
+
+  // restoreNativeZoom restores the viewport content saved by disableNativeZoom, if any.
+  restoreNativeZoom() {
+    if (!this.savedViewportContent) {
+      return;
+    }
+
+    const viewport = document.querySelector(ViewportMetaSelector);
+
+    if (viewport) {
+      viewport.setAttribute("content", this.savedViewportContent);
+    }
+
+    this.savedViewportContent = "";
   }
 
   // Navigates to the specified URL, optionally with a delay set in milliseconds and a blocked user interface.

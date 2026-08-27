@@ -30,7 +30,6 @@ A virtual machine with a dedicated operating system environment provides even mo
 | `demo/`       | Build context for the public [demo site](https://demo.photoprism.app/), including Traefik and job configuration.                             |
 | `ddns/`       | Minimal image for the Dynamic DNS updater used by our hosted services.                                                                       |
 | `dummy/`      | Test doubles for OIDC and WebDAV used by acceptance tests and local development.                                                             |
-| `goproxy/`    | Caching Go module proxy used to speed up CI and local builds.                                                                                |
 
 ### Which Image Should I Use?
 
@@ -50,5 +49,7 @@ These files are **kept for documentation and reference purposes only**:
 - Compatibility with current Go dependencies (notably C bindings such as [`govips`](https://github.com/davidbyttow/govips), [`onnxruntime_go`](https://github.com/yalue/onnxruntime_go), and the TensorFlow C API) is **not guaranteed** — a successful build on an older base does not imply a working runtime.
 
 If you still need to build one of these images, consider it **"use at your own risk"**: you may need to upgrade individual system packages (for example pulling `libvips` from a backport PPA, as `scripts/dist/install-libvips.sh` does for Ubuntu Jammy), adjust pinned Go dependencies, or patch the Dockerfile to match the current upstream. Please do not open issues for problems that only affect legacy images.
+
+One exception to the note above: every image that installs ImageMagick also installs our `scripts/dist/convert/policy.xml`, at `/etc/ImageMagick-6/` or `/etc/ImageMagick-7/` depending on the version its base ships. This keeps the Dockerfiles consistent and stops a revived base from silently losing PDF and vector previews to a restrictive distribution default, but it is not a claim that these images are maintained — none of them is built or tested, so the setting is unverified there.
 
 For questions about supported environments and current system requirements, see the [System Requirements](https://docs.photoprism.app/getting-started/#system-requirements) documentation.

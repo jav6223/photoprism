@@ -1,6 +1,6 @@
 PhotoPrism — Frontend CODEMAP
 
-**Last Updated:** May 5, 2026
+**Last Updated:** August 18, 2026
 
 Purpose
 - Help agents and contributors navigate the Vue 3 + Vuetify 3 app quickly and make safe changes.
@@ -18,7 +18,7 @@ Directory Map (src)
 - `src/app.js` — app bootstrap: creates Vue app, installs Vuetify + plugins, configures router, mounts to `#app`
 - `src/app/routes.js` — all route definitions (guards, titles, meta)
 - `src/app/session.js` — `$config` and `$session` singletons wired from server-provided `window.__CONFIG__` and storage
-- `src/common/*` — framework-agnostic helpers: `$api` (Axios), `$notify`, `$view`, `$event` (PubSub), i18n (`gettext`), util, fullscreen, map utils, websocket
+- `src/common/*` — framework-agnostic helpers: `$api` (Axios), `$notify`, `$view`, `$event` (PubSub), i18n (`gettext`), util, fullscreen, map utils, websocket, `sphere.js` (lazy-loaded 360° viewer wrapper)
 - `src/component/*` — Vue components; `src/component/components.js` registers global components
 - `src/page/*` — route views (Albums, Photos, Places, Settings, Admin, Discover, Help, Login, etc.)
 - `src/model/*` — REST models; base `Rest` class (`model/rest.js`) wraps Axios CRUD for collections and entities
@@ -27,10 +27,10 @@ Directory Map (src)
 - `src/locales/*` — gettext catalogs; extraction/compile scripts in `package.json`
 
 Startup Templates & Splash Screen
-- The HTML shell is rendered from `assets/templates/index.gohtml` (and `pro/assets/templates/index.gohtml` / `plus/...` / `portal/...`). Each template includes `app.gohtml` for the splash markup and `app.js.gohtml` to inject the bundle.
+- The HTML shell is rendered from `assets/templates/index.gohtml` (and the `pro/` / `portal/` overlays under `assets/templates/`; Plus has none and uses these templates). Each template includes `app.gohtml` for the splash markup and `app.js.gohtml` to inject the bundle.
 - The browser check logic resides in `assets/static/js/browser-check.js` and is included via `app.js.gohtml`; it performs capability checks (Promise, fetch, AbortController, `script.noModule`, etc.) before the main bundle executes. Update the same files in private repos whenever the loader logic changes, and keep the script order so the check runs first.
 - Splash styles, including the `.splash-warning` fallback banner, live in `frontend/src/css/splash.css`. Keep styling changes there so public and private editions stay aligned.
-- Baseline support: Safari 13 / iOS 13 or current Chrome, Edge, or Firefox. If the support matrix changes, revise the warning text in `app.js.gohtml` and the CSS message accordingly.
+- Baseline support: defined by the `browserslist` query in `frontend/package.json` and resolved with `(cd frontend && npx browserslist)`; `.babelrc` sets no explicit `targets`, so `@babel/preset-env` compiles to exactly that set. If the support matrix changes, revise the warning text in `app.js.gohtml` and the CSS message accordingly.
 - Lightbox videos: `createVideoElement` wires listeners through an `AbortController` stored in `content.data.events`; `contentDestroy` aborts it so video and RemotePlayback handlers vanish with the slide.
 
 Runtime & Plugins
@@ -39,10 +39,10 @@ Runtime & Plugins
   - **Known caveats at 3.12.2:**
     - Vuetify upstream issue #22828 — `v-select`'s `@blur` fires when the menu opens (introduced by the 3.12.2 screenreader navigation fix). PhotoPrism is not affected because we only bind `@blur` on `v-text-field`, `v-textarea`, and `v-combobox`; if you ever attach `@blur` to a `v-select`, expect spurious calls until that upstream bug is fixed.
     - The `.v-field--focused` CSS class can linger on a previously-focused `v-autocomplete` input after the user clicks into another autocomplete (`document.activeElement` is correct, but Vuetify's internal `isFocused` is under-aggressive about clearing in 3.12.2). This is the inverse symptom of Vuetify #22697 — fixing it overshot in 3.12.3 and caused #5538. Functionally harmless in the photo edit dialog because the affected fields are not on screen together.
-- Router: Vue Router 4, history base at `$config.frontendUri` (default `/library` for CE/Plus/Pro and `/portal/admin` for Portal)
+- Router: Vue Router 4, history base at `$config.frontendUri` (default `/library` for CE/Plus/Pro and `/portal` for Portal)
 - I18n: `vue3-gettext` via `common/gettext.js`; canonical extraction via root `make gettext-extract` (scans `frontend/src` plus available overlays in `plus/frontend`, `pro/frontend`, and `portal/frontend`), compile with `npm run gettext-compile`
 - HTML sanitization: `vue-3-sanitize` + `vue-sanitize-directive`
-- Tooltips: `floating-vue`
+- Tooltips: Vuetify `<v-tooltip>` component + `v-tooltip` directive (auto-imported per SFC by `webpack-plugin-vuetify`)
 - Video: HLS.js assigned to `window.Hls`
 - PWA: Workbox registers a service worker after config load (see `src/common/pwa.js` and `src/app.js`); scope and registration URL derive from `$config.baseUri` so non-root deployments work. In Portal mode we intentionally skip root-scope (`/`) registration to avoid shared-domain cache interference with instance scopes under `/i/<name>/`. Instance clients under `/i/<name>/` also try to unregister legacy root-scope registrations before registering their scoped worker, so upgrades from older shared-domain setups can recover without manual browser cleanup. Workbox precache rules live in `frontend/webpack.config.js` (see the `GenerateSW` plugin); locale chunks and non-woff2 font variants are excluded there so we don’t force every user to download those assets on first visit.
 - Service worker cleanup: `frontend/src/sw-scope-cleanup.js` provides strict same-scope precache cleanup. `cleanupOutdatedCaches` is disabled in `GenerateSW` to avoid broad cross-scope cache deletion on shared origins.
@@ -92,7 +92,7 @@ Theming & UI
 - Global components: register in `src/component/components.js` when they are broadly reused
 
 Testing
-- Vitest config: `frontend/vitest.config.js` (Vue plugin, alias map to `src/*`), `tests/vitest/**/*`
+- Vitest config: `frontend/vitest.config.mjs` (Vue plugin, alias map to `src/*`), `tests/vitest/**/*`
 - Run: `cd frontend && npm run test` (or `make test-js` from repo root)
 - Acceptance: TestCafe configs in `frontend/tests/acceptance`; run against a live server
 - Detailed test/lint guide (humans + agents): `frontend/tests/README.md`
@@ -140,7 +140,7 @@ Common How‑Tos
 Conventions & Safety
 - Avoid `v-html`; use `v-sanitize` or `$util.sanitizeHtml()` (build enforces this)
 - Keep big components lazy if needed; split views logically under `src/page`
-- Respect aliases in `vitest.config.js` when importing (`app`, `common`, `component`, `model`, `options`, `page`)
+- Respect aliases in `vitest.config.mjs` when importing (`app`, `common`, `component`, `model`, `options`, `page`)
 
 Frequently Touched Files
 - Bootstrap: `src/app.js`, `src/app.vue`

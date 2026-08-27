@@ -46,13 +46,21 @@ vi.mock("common/notify", () => ({
 function buildConfigMock(overrides = {}) {
   return {
     get: vi.fn((key) => {
-      if (key === "demo") return false;
-      if (key === "uploadAllow") return "image/*";
-      if (key === "uploadNSFW") return false;
+      if (key === "demo") {
+        return false;
+      }
+      if (key === "uploadAllow") {
+        return "image/*";
+      }
+      if (key === "uploadNSFW") {
+        return false;
+      }
       return null;
     }),
     feature: vi.fn(() => false),
     filesQuotaReached: vi.fn(() => false),
+    storageLow: vi.fn(() => false),
+    insufficientStorage: vi.fn(() => false),
     ...overrides,
   };
 }
@@ -84,7 +92,9 @@ describe("component/upload/dialog", () => {
   });
 
   afterEach(() => {
-    if (wrapper) wrapper.unmount();
+    if (wrapper) {
+      wrapper.unmount();
+    }
     vi.clearAllMocks();
   });
 
@@ -137,10 +147,17 @@ describe("component/upload/dialog", () => {
       expect(fu.props("disabled")).toBe(true);
     });
 
-    it("is disabled when filesQuotaReached is true", async () => {
-      wrapper.vm.filesQuotaReached = true;
+    it("is disabled when insufficientStorage is true", async () => {
+      wrapper.vm.insufficientStorage = true;
       await nextTick();
       const fu = wrapper.findComponent({ name: "VFileUpload" });
+      expect(fu.props("disabled")).toBe(true);
+    });
+
+    it("is initialized as disabled when config reports insufficient storage", () => {
+      const w = mountDialog({ configOverrides: { insufficientStorage: vi.fn(() => true) } });
+      expect(w.vm.insufficientStorage).toBe(true);
+      const fu = w.findComponent({ name: "VFileUpload" });
       expect(fu.props("disabled")).toBe(true);
     });
 

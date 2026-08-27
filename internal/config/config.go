@@ -1,7 +1,7 @@
 /*
 Package config provides global options, command-line flags, and user settings.
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
 	it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -14,7 +14,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	The AGPL is supplemented by our Trademark and Brand Guidelines,
 	which describe how our Brand Assets may be used:
-	<https://www.photoprism.app/trademark>
+	<https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -33,7 +33,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,9 +53,12 @@ import (
 	"github.com/photoprism/photoprism/internal/ai/face"
 	"github.com/photoprism/photoprism/internal/ai/vision"
 	"github.com/photoprism/photoprism/internal/api/download"
+	"github.com/photoprism/photoprism/internal/auth/tokens"
 	"github.com/photoprism/photoprism/internal/config/customize"
 	"github.com/photoprism/photoprism/internal/config/ttl"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/event"
+	"github.com/photoprism/photoprism/internal/ffmpeg"
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/internal/photoprism/dl"
 	"github.com/photoprism/photoprism/internal/service/hub"
@@ -65,27 +67,34 @@ import (
 	"github.com/photoprism/photoprism/pkg/checksum"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
 	"github.com/photoprism/photoprism/pkg/i18n"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
 // Config aggregates CLI flags, options.yml overrides, runtime settings, and shared resources (database, caches) for the running instance.
 type Config struct {
-	cliCtx    *cli.Context
-	options   *Options
-	settings  *customize.Settings
-	db        *gorm.DB
-	dbVersion string
-	hub       *hub.Config
-	hubCancel context.CancelFunc
-	hubLock   sync.Mutex
-	token     string
-	serial    string
-	env       string
-	start     bool
-	ready     atomic.Bool
-	cache     *gc.Cache
+	cliCtx        *cli.Context
+	options       *Options
+	settings      *customize.Settings
+	db            *gorm.DB
+	dbVersion     string
+	hub           *hub.Config
+	hubCancel     context.CancelFunc
+	hubLock       sync.Mutex
+	faceWarned    sync.Map
+	faceModel     string
+	faceModelFlag string
+	token         string
+	serial        string
+	tokenKey      []byte
+	tokenKeyOnce  sync.Once
+	env           string
+	start         bool
+	ready         atomic.Bool
+	cache         *gc.Cache
 }
 
 // Values is a shorthand alias for map[string]interface{}.
@@ -170,6 +179,10 @@ func NewConfig(ctx *cli.Context) *Config {
 		start:   start,
 		cache:   gc.New(time.Minute, 10*time.Minute),
 	}
+
+	// Keep what the environment or the command line asked for, since "options.yml" is loaded
+	// last and a model it names is what an instance must keep using - see initFaceModel.
+	c.faceModelFlag = c.options.FaceModel
 
 	// Override options with values from the "options.yml" file, if it exists.
 	if optionsYaml := c.OptionsYaml(); fs.FileExists(optionsYaml) {
@@ -268,15 +281,21 @@ func (c *Config) Init() error {
 	// Initialize thumbnail package.
 	thumb.Init(memory.FreeMemory(), c.IndexWorkers(), c.ThumbLibrary())
 
-	// Load optional vision package configuration.
-	if visionYaml := c.VisionYaml(); !fs.FileExistsNotEmpty(visionYaml) {
-		// Do nothing.
-	} else if loadErr := vision.Config.Load(visionYaml); loadErr != nil {
-		log.Warnf("vision: %s", loadErr)
-	}
+	// Set minimum free storage space in percent.
+	disk.StorageLowPct = c.StorageFree()
+	DisableStorageCheck.Store(disk.StorageLowPct <= 0)
+
+	c.LoadVisionConfig()
+
+	// Settle which face embedding model this instance uses, which needs the database and has
+	// to happen before Propagate configures the embedder from it.
+	c.initFaceModel()
 
 	// Update package defaults.
 	c.Propagate()
+
+	// Report the download token configuration.
+	c.reportDownloadTokenOptions()
 
 	// Show support information.
 	if !c.Sponsor() {
@@ -289,6 +308,22 @@ func (c *Config) Init() error {
 	c.ready.Store(true)
 
 	return nil
+}
+
+// reportDownloadTokenOptions reports the download token configuration. Both notices describe static
+// option values, so Init calls this once at startup rather than Propagate, which runs again whenever an
+// admin saves Advanced Settings.
+func (c *Config) reportDownloadTokenOptions() {
+	// A static token is an explicit opt-in whose trade-off is not visible from the URLs it produces: it
+	// keeps permanent links working, but anyone holding it can download public content. Sessions are
+	// unaffected, as they receive signed tokens.
+	if !c.Public() && c.options.DownloadToken != "" {
+		event.SystemWarn([]string{"config", "download-token", "static value configured, so it grants downloads of public content without identifying a session"})
+	}
+
+	if raw := c.options.DownloadTokenMaxAge; raw > 0 && raw < int64(ttl.DownloadTokenMinAge) {
+		event.SystemWarn([]string{"config", "download-token-maxage", "%ds is below the %ds minimum and has been raised to it"}, raw, int64(ttl.DownloadTokenMinAge))
+	}
 }
 
 // InitCore initializes configuration values without connecting to the database
@@ -364,6 +399,9 @@ func (c *Config) IsReady() bool {
 }
 
 // Propagate updates config options in other packages as needed.
+// It assigns package-level values without synchronization, which is safe because it runs at startup and
+// otherwise only when an admin changes Advanced Settings — a rare action after which both call sites set
+// mutex.Restart, as a restart is required for every change to take effect.
 func (c *Config) Propagate() {
 	FlushCache()
 	log.SetLevel(c.LogLevel())
@@ -379,6 +417,9 @@ func (c *Config) Propagate() {
 	thumb.SamplesPath = c.SamplesPath()
 	thumb.IccProfilesPath = c.IccProfilesPath()
 	initThumbs()
+
+	// Configure FFmpeg package.
+	ffmpeg.SetExclude(c.FFmpegExclude())
 
 	// Configure video download package.
 	dl.YtDlpBin = c.YtDlpBin()
@@ -401,9 +442,20 @@ func (c *Config) Propagate() {
 		c.ThumbCachePath(),
 	}
 
-	// Set cache expiration defaults.
+	// Set cache expiration defaults, including the signed download token lifetime read when one is minted.
 	ttl.CacheDefault = c.HttpCacheMaxAge()
 	ttl.CacheVideo = c.HttpVideoMaxAge()
+	ttl.DownloadToken = ttl.Duration(int(c.DownloadTokenMaxAge().Seconds()))
+
+	// Configure signed URL tokens, which must be complete before anything mints or verifies one. A single
+	// signing key covers every token kind (downloads today, previews next); the signature path is per kind.
+	tokens.Download.Key = c.TokenSigningKey()
+	tokens.Download.SignaturePath = c.ApiUri()
+
+	// Configure download-token delivery: public mode delivers a placeholder, every session receives a
+	// signed token, and the coarse token covers only the sessionless client configs.
+	tokens.PublicMode = c.Public()
+	tokens.CoarseDownload = c.DownloadToken()
 
 	// Set geocoding parameters.
 	places.UserAgent = c.UserAgent()
@@ -419,32 +471,36 @@ func (c *Config) Propagate() {
 	// Set path for user assets.
 	entity.UsersPath = c.UsersPath()
 
-	// Set API preview and download default tokens.
-	entity.PreviewToken.Set(c.PreviewToken(), entity.TokenConfig)
-	entity.DownloadToken.Set(c.DownloadToken(), entity.TokenConfig)
+	// Set the API preview default token (the download token is no longer stored per session). The
+	// placeholder is never registered, so a missing signing key rejects previews instead of admitting it.
+	if previewToken := c.PreviewToken(); previewToken != PreviewTokenPlaceholder {
+		entity.PreviewToken.Set(entity.TokenConfig, previewToken)
+	}
+
 	entity.ValidateTokens = !c.Public()
 
 	// Set face recognition parameters.
+	face.SizeThreshold = c.FaceSize()
 	face.ScoreThreshold = c.FaceScore()
 	face.OverlapThreshold = c.FaceOverlap()
 	face.ClusterScoreThreshold = c.FaceClusterScore()
 	face.ClusterSizeThreshold = c.FaceClusterSize()
 	face.ClusterCore = c.FaceClusterCore()
+	// Derived rather than configured, but it still has to follow FACE_CLUSTER_CORE: leaving it at
+	// the package initializer froze the clustering trigger at the shipped default, so raising the
+	// core size moved the cluster definition and not the number of markers that starts a pass.
+	face.SampleThreshold = c.FaceSampleThreshold()
 	face.CollisionDist = c.FaceCollisionDist()
 	face.Epsilon = c.FaceEpsilonDist()
 	face.ClusterRadius = c.FaceClusterRadius()
 	face.ClusterDist = c.FaceClusterDist()
 	face.MatchDist = c.FaceMatchDist()
-	face.SkipChildren = c.FaceSkipChildren()
-	face.IgnoreBackground = !c.FaceAllowBackground()
-	if err := face.ConfigureEngine(face.EngineSettings{
-		Name: c.FaceEngine(),
-		ONNX: face.ONNXOptions{
-			ModelPath: c.FaceEngineModelPath(),
-			Threads:   c.FaceEngineThreads(),
-		},
-	}); err != nil {
+	face.MatchMargin = c.FaceMatchMargin()
+	if err := c.ConfigureFaceDetector(0); err != nil {
 		log.Warnf("faces: %s (configure engine)", err)
+	}
+	if err := c.ConfigureFaceEmbedder(c.FaceModel()); err != nil {
+		log.Warnf("faces: %s (configure embedding model)", err)
 	}
 
 	// Set default theme and locale.
@@ -496,6 +552,12 @@ func (c *Config) SaveOptionsPatch(patch Values) (bool, error) {
 		return false, nil
 	}
 
+	// Values are typed against the options they set before anything is written, so that the file
+	// and the running configuration cannot end up holding different numbers.
+	if err := CoerceOptionValues(patch); err != nil {
+		return false, err
+	}
+
 	fileName, values, err := c.loadOptionsYAML()
 	if err != nil {
 		return false, err
@@ -505,7 +567,68 @@ func (c *Config) SaveOptionsPatch(patch Values) (bool, error) {
 		return false, nil
 	}
 
+	if _, err = c.writeOptionsYAML(fileName, values); err != nil {
+		return true, err
+	}
+
+	return true, c.applyOptionValues(patch)
+}
+
+// DeleteOptionsPatch removes the specified keys from "options.yml" and reports whether the file
+// was changed. Removing a key restores the default, which writing an empty value does not: the
+// loader cannot tell an option that was cleared from one that was set to nothing.
+func (c *Config) DeleteOptionsPatch(keys ...string) (bool, error) {
+	if c == nil || c.options == nil || len(keys) == 0 {
+		return false, nil
+	}
+
+	// Nothing to remove from a file that does not exist, and reading one through loadOptionsYAML
+	// would create its directory on the way. A helper that removes a setting must not leave a
+	// directory tree behind as its only effect.
+	if fileName := c.OptionsYaml(); fileName == "" || !fs.FileExists(fileName) {
+		return false, nil
+	}
+
+	fileName, values, err := c.loadOptionsYAML()
+	if err != nil {
+		return false, err
+	}
+
+	changed := false
+
+	for _, key := range keys {
+		if _, ok := values[key]; ok {
+			delete(values, key)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return false, nil
+	}
+
+	// Nothing is applied in return: a removed key leaves no value to read back, and the caller
+	// clears its own field.
 	return c.writeOptionsYAML(fileName, values)
+}
+
+// applyOptionValues applies the patched values, and only those, to the in-memory options.
+//
+// Reading the file back instead would apply every key it holds - including ones a flag or an
+// environment variable overrode for this run, and ones another writer left there. That is how
+// recording a face model came to replace a live database configuration.
+func (c *Config) applyOptionValues(patch Values) error {
+	if c == nil || c.options == nil || len(patch) == 0 {
+		return nil
+	}
+
+	b, err := yaml.Marshal(patch)
+
+	if err != nil {
+		return err
+	}
+
+	return yaml.Unmarshal(b, c.options)
 }
 
 // loadOptionsYAML loads options.yml into a writable map and returns its file path.
@@ -570,7 +693,8 @@ func mergeOptionValues(dst Values, src Values) bool {
 	return changed
 }
 
-// writeOptionsYAML persists merged options values and reloads in-memory options.
+// writeOptionsYAML persists merged options values. It does not touch the in-memory options,
+// which the caller applies through applyOptionValues when it changed one.
 func (c *Config) writeOptionsYAML(fileName string, values Values) (bool, error) {
 	b, err := yaml.Marshal(values)
 	if err != nil {
@@ -579,10 +703,6 @@ func (c *Config) writeOptionsYAML(fileName string, values Values) (bool, error) 
 
 	if err = os.WriteFile(fileName, b, fs.ModeConfigFile); err != nil {
 		return false, err
-	}
-
-	if err = c.options.Load(fileName); err != nil {
-		return true, err
 	}
 
 	return true, nil
@@ -616,48 +736,101 @@ func (c *Config) CliContextString(name string) string {
 	return c.cliCtx.String(name)
 }
 
-// readSerial reads and returns the current storage serial.
-func (c *Config) readSerial() string {
-	storageName := filepath.Join(c.StoragePath(), serialName)
-	backupName := c.BackupPath(serialName)
-
-	if fs.FileExists(storageName) {
-		if data, err := os.ReadFile(storageName); err == nil && len(data) == 16 { //nolint:gosec // path is computed from config storage
-			return string(data)
-		} else {
-			log.Tracef("config: could not read %s (%s)", clean.Log(storageName), err)
-		}
+// serialFiles returns the storage serial copies in lookup order, each with the mode to create it with.
+// The mode is deliberately permissive: the serial must stay readable when the UID/GID of the process
+// changes, which happens when an instance is reconfigured (e.g. in compose.yaml) and restarted.
+func (c *Config) serialFiles() []struct {
+	Name string
+	Mode os.FileMode
+} {
+	return []struct {
+		Name string
+		Mode os.FileMode
+	}{
+		{filepath.Join(c.StoragePath(), serialName), fs.ModeFile},
+		{c.BackupPath(serialName), fs.ModeFile},
 	}
+}
 
-	if fs.FileExists(backupName) {
-		if data, err := os.ReadFile(backupName); err == nil && len(data) == 16 { //nolint:gosec // backup file path is generated internally
-			return string(data)
-		} else {
-			log.Tracef("config: could not read %s (%s)", clean.Log(backupName), err)
+// readSerial returns the storage serial from the first copy that holds a valid one, or an empty string
+// if none does, in which case InitSerial generates one.
+func (c *Config) readSerial() string {
+	for _, f := range c.serialFiles() {
+		if serial := readSerialFile(f.Name); serial != "" {
+			return serial
 		}
 	}
 
 	return ""
 }
 
-// InitSerial initializes storage directories with a random serial.
-func (c *Config) InitSerial() (err error) {
-	if c.Serial() != "" {
-		return nil
+// readSerialFile returns the serial stored in a single file, or an empty string if it is absent,
+// unreadable, or invalid.
+// Surrounding whitespace is tolerated because a stray newline would otherwise discard the serial and
+// rotate the preview token derived from it.
+func readSerialFile(fileName string) string {
+	data, err := os.ReadFile(fileName) //nolint:gosec // path is computed from the storage and backup paths
+
+	switch {
+	case os.IsNotExist(err):
+		return ""
+	case err != nil:
+		event.SystemWarn([]string{"config", "serial", "read %s", "%s"}, clean.Log(fileName), clean.Error(err))
+		return ""
 	}
 
-	c.serial = rnd.GenerateUID('z')
-
-	storageName := filepath.Join(c.StoragePath(), serialName)
-	backupName := c.BackupPath(serialName)
-
-	if err = os.WriteFile(storageName, []byte(c.serial), fs.ModeFile); err != nil {
-		return fmt.Errorf("could not create %s: %s", storageName, err)
+	if serial := strings.TrimSpace(string(data)); rnd.IsUID(serial, serialPrefix) {
+		return serial
 	}
 
-	if err = os.WriteFile(backupName, []byte(c.serial), fs.ModeFile); err != nil {
-		return fmt.Errorf("could not create %s: %s", backupName, err)
+	event.SystemWarn([]string{"config", "serial", "read %s", "invalid value"}, clean.Log(fileName))
+
+	return ""
+}
+
+// serialFileHas reports whether the file already holds the given serial, without logging.
+// It guards the restore path, which must not repeat the warnings readSerialFile emits for a bad copy.
+func serialFileHas(fileName, serial string) bool {
+	data, err := os.ReadFile(fileName) //nolint:gosec // path is computed from the storage and backup paths
+	return err == nil && strings.TrimSpace(string(data)) == serial
+}
+
+// restoreSerial rewrites the serial copies that are missing or damaged, so one surviving copy heals the
+// other. Failures are reported but never fatal, since the serial is already available in memory.
+func (c *Config) restoreSerial(serial string) {
+	for _, f := range c.serialFiles() {
+		if serialFileHas(f.Name, serial) {
+			continue
+		}
+
+		if err := os.WriteFile(f.Name, []byte(serial), f.Mode); err != nil {
+			event.SystemWarn([]string{"config", "serial", "restore %s", "%s"}, clean.Log(f.Name), clean.Error(err))
+		} else {
+			event.SystemInfo([]string{"config", "serial", "restore %s", status.Succeeded}, clean.Log(f.Name))
+		}
 	}
+}
+
+// InitSerial initializes the storage path with a random serial if it does not have one yet, and restores
+// any copy that is missing or damaged.
+// It identifies the storage across restarts, so it is kept redundantly; only a failure to store the
+// authoritative copy is fatal.
+func (c *Config) InitSerial() error {
+	serial := c.Serial()
+
+	if serial == "" {
+		serial = rnd.GenerateUID(serialPrefix)
+		storageName := filepath.Join(c.StoragePath(), serialName)
+
+		if err := os.WriteFile(storageName, []byte(serial), fs.ModeFile); err != nil {
+			return fmt.Errorf("could not create %s: %w", clean.Log(storageName), err)
+		}
+
+		// Adopt the serial only once stored, so a restart cannot silently change the preview token.
+		c.serial = serial
+	}
+
+	c.restoreSerial(serial)
 
 	return nil
 }
@@ -832,135 +1005,12 @@ func (c *Config) Shutdown() {
 	// Shutdown thumbnail library.
 	thumb.Shutdown()
 
-	// Close database connection.
+	// Reported on the console-only system log, as the database backing the error log is going away.
 	if err := c.CloseDb(); err != nil {
-		log.Errorf("could not close database connection: %s", err)
+		event.SystemError([]string{"config", "database", "close", "%s"}, clean.Error(err))
 	} else {
-		log.Debug("closed database connection")
+		event.SystemDebug([]string{"config", "database", "close", status.Succeeded})
 	}
-}
-
-// IndexWorkers returns the number of indexing workers.
-func (c *Config) IndexWorkers() int {
-	// Use one worker on systems with less than the recommended amount of memory.
-	if TotalMem < RecommendedMem {
-		return 1
-	}
-
-	// NumCPU returns the number of logical CPU cores.
-	cores := min(
-		// Limit to physical cores to avoid high load on HT capable CPUs.
-		runtime.NumCPU(), cpuid.CPU.PhysicalCores)
-
-	// Limit number of workers when using SQLite3 to avoid database locking issues.
-	if c.DatabaseDriver() == SQLite3 && (cores >= 8 && c.options.IndexWorkers <= 0 || c.options.IndexWorkers > 4) {
-		return 4
-	}
-
-	// Return explicit value if set and not too large.
-	if c.options.IndexWorkers > runtime.NumCPU() {
-		return runtime.NumCPU()
-	} else if c.options.IndexWorkers > 0 {
-		return c.options.IndexWorkers
-	}
-
-	// Use half the available cores by default.
-	if cores > 1 {
-		return cores / 2
-	}
-
-	return 1
-}
-
-// IndexSchedule returns the indexing schedule in cron format, e.g. "0 */3 * * *" to start indexing every 3 hours.
-func (c *Config) IndexSchedule() string {
-	return Schedule(c.options.IndexSchedule)
-}
-
-// WakeupInterval returns the duration between background worker runs
-// required for face recognition and index maintenance (1-86400s).
-func (c *Config) WakeupInterval() time.Duration {
-	if c.options.WakeupInterval <= 0 {
-		if c.Unsafe() {
-			// Worker can be disabled only in unsafe mode.
-			return time.Duration(0)
-		} else {
-			// Default to 15 minutes if no interval is set.
-			return DefaultWakeupInterval
-		}
-	}
-
-	// Do not run more than once per minute.
-	if c.options.WakeupInterval < MinWakeupInterval/time.Second {
-		return MinWakeupInterval
-	} else if c.options.WakeupInterval < MinWakeupInterval {
-		c.options.WakeupInterval *= time.Second
-	}
-
-	// Do not run less than once per day.
-	if c.options.WakeupInterval > MaxWakeupInterval {
-		return MaxWakeupInterval
-	}
-
-	return c.options.WakeupInterval
-}
-
-// AutoIndex returns the auto index delay duration.
-func (c *Config) AutoIndex() time.Duration {
-	if c.options.AutoIndex < 0 {
-		return -1 * time.Second
-	} else if c.options.AutoIndex == 0 || c.options.AutoIndex > 604800 {
-		return DefaultAutoIndexDelay * time.Second
-	}
-
-	return time.Duration(c.options.AutoIndex) * time.Second
-}
-
-// AutoImport returns the auto import delay duration.
-func (c *Config) AutoImport() time.Duration {
-	if c.options.AutoImport < 0 || c.ReadOnly() {
-		return -1 * time.Second
-	} else if c.options.AutoImport == 0 || c.options.AutoImport > 604800 {
-		return DefaultAutoImportDelay * time.Second
-	}
-
-	return time.Duration(c.options.AutoImport) * time.Second
-}
-
-// OriginalsLimit returns the maximum size of originals in MB.
-func (c *Config) OriginalsLimit() int {
-	if c.options.OriginalsLimit <= 0 || c.options.OriginalsLimit > 100000 {
-		return -1
-	}
-
-	return c.options.OriginalsLimit
-}
-
-// OriginalsLimitBytes returns the maximum size of originals in bytes.
-func (c *Config) OriginalsLimitBytes() int64 {
-	if result := c.OriginalsLimit(); result <= 0 {
-		return -1
-	} else {
-		return int64(result) * 1024 * 1024
-	}
-}
-
-// ResolutionLimit returns the maximum resolution of originals in megapixels (width x height).
-func (c *Config) ResolutionLimit() int {
-	result := c.options.ResolutionLimit
-
-	// Disabling or increasing the limit is at your own risk.
-	// Only sponsors receive support in case of problems.
-	switch {
-	case result == 0:
-		return DefaultResolutionLimit
-	case result < 0:
-		return -1
-	case result > 900:
-		result = 900
-	}
-
-	return result
 }
 
 // RenewApiKeys renews the api credentials for maps and places.

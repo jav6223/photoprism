@@ -15,6 +15,10 @@ func TestNewSettings(t *testing.T) {
 		assert.Equal(t, DefaultLanguage, s.UI.Language)
 		assert.Equal(t, DefaultTimeZone, s.UI.TimeZone)
 		assert.Equal(t, DefaultStartPage, s.UI.StartPage)
+		assert.Equal(t, true, s.UI.Scrollbar)
+		assert.Equal(t, false, s.UI.Zoom)
+		assert.Equal(t, true, s.UI.OpenOnHover)
+		assert.Equal(t, false, s.UI.ReduceMotion)
 		assert.Equal(t, DefaultMapsStyle, s.Maps.Style)
 	})
 	t.Run("Custom", func(t *testing.T) {
@@ -37,6 +41,18 @@ func TestNewSettings(t *testing.T) {
 		assert.Equal(t, DefaultTimeZone, s.UI.TimeZone)
 		assert.Equal(t, DefaultStartPage, s.UI.StartPage)
 		assert.Equal(t, DefaultMapsStyle, s.Maps.Style)
+	})
+	t.Run("ImportDest", func(t *testing.T) {
+		s := NewDefaultSettings()
+		// A normalized, valid pattern is preserved.
+		s.Import.Dest = "2006/01/20060102_150405_82F63B78.jpg"
+		s.Propagate()
+		assert.Equal(t, "2006/01/20060102_150405_82F63B78.jpg", s.Import.Dest)
+		// An invalid or denormalized pattern is reset so GetDest falls back to the default.
+		s.Import.Dest = "/1/2/20060102_150405_82F63B78.jpg"
+		s.Propagate()
+		assert.Equal(t, "", s.Import.Dest)
+		assert.Equal(t, DefaultImportDest, s.Import.GetDest())
 	})
 }
 
@@ -83,6 +99,9 @@ func TestSettings_Save(t *testing.T) {
 		s := NewDefaultSettings()
 		s.UI.Theme = "onyx"
 		s.UI.Language = "de"
+		// Set the UI booleans to non-default values so the round-trip proves their yaml tags map.
+		s.UI.Scrollbar = false
+		s.UI.ReduceMotion = true
 
 		assert.Equal(t, "onyx", s.UI.Theme)
 		assert.Equal(t, "de", s.UI.Language)
@@ -90,6 +109,13 @@ func TestSettings_Save(t *testing.T) {
 		if err := s.Save("testdata/settings_tmp.yml"); err != nil {
 			t.Fatal(err)
 		}
+
+		reloaded := NewDefaultSettings()
+		if err := reloaded.Load("testdata/settings_tmp.yml"); err != nil {
+			t.Fatal(err)
+		}
+		assert.Equal(t, false, reloaded.UI.Scrollbar)
+		assert.Equal(t, true, reloaded.UI.ReduceMotion)
 
 		if err := os.Remove("testdata/settings_tmp.yml"); err != nil {
 			t.Fatal(err)

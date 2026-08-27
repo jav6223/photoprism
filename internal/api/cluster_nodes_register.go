@@ -11,7 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/auth/oidc"
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/internal/server/limiter"
@@ -21,6 +23,7 @@ import (
 	"github.com/photoprism/photoprism/internal/service/cluster/theme"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/http/header"
+	"github.com/photoprism/photoprism/pkg/http/scheme"
 	"github.com/photoprism/photoprism/pkg/i18n"
 	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/rnd"
@@ -235,6 +238,10 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			if s := normalizeSiteURL(req.SiteUrl); s != "" {
 				node.SiteUrl = s
 			}
+			if dn := clean.TypeUnicode(req.DisplayName); dn != "" {
+				// Instance-reported name; NameSrc defaults to SrcAuto ("").
+				node.DisplayName = dn
+			}
 			if appName != "" {
 				node.AppName = appName
 			}
@@ -244,6 +251,8 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			if nodeTheme != "" {
 				node.Theme = nodeTheme
 			}
+
+			applyRequestGroupConfig(node, &req)
 
 			if requestedUUID != "" {
 				oldUUID := node.UUID
@@ -327,6 +336,7 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 				Node:               reg.BuildClusterNode(*node, reg.NodeOptsForSession(nil)),
 				Secrets:            respSecret,
 				JWKSUrl:            buildJWKSURL(conf),
+				PortalLoginUrl:     buildPortalLoginURL(conf),
 				AlreadyRegistered:  true,
 				AlreadyProvisioned: node.Database != nil && node.Database.Name != "",
 			}
@@ -390,6 +400,13 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			n.SiteUrl = s
 		}
 
+		if dn := clean.TypeUnicode(req.DisplayName); dn != "" {
+			// Instance-reported name; NameSrc defaults to SrcAuto ("").
+			n.DisplayName = dn
+		}
+
+		applyRequestGroupConfig(n, &req)
+
 		// Generate node secret (must satisfy client secret format for entity.Client).
 		n.ClientSecret = rnd.ClientSecret()
 		n.RotatedAt = nowRFC3339()
@@ -425,6 +442,7 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			Node:               reg.BuildClusterNode(*n, reg.NodeOptsForSession(nil)),
 			Secrets:            &cluster.RegisterSecrets{ClientSecret: n.ClientSecret, RotatedAt: n.RotatedAt},
 			JWKSUrl:            buildJWKSURL(conf),
+			PortalLoginUrl:     buildPortalLoginURL(conf),
 			AlreadyRegistered:  false,
 			AlreadyProvisioned: shouldProvisionDB,
 		}
@@ -538,6 +556,139 @@ func validateSiteURL(u string) bool {
 			return true
 		}
 		return false
+	}
+
+	return false
+}
+
+// applyRequestGroupConfig copies the instance-declared group admission config
+// from the registration request onto the node, normalizing identifiers and
+// dropping non-federatable roles. GroupsSrc is set to ClientGroupsSrcNode so
+// the registry applies admin-override-wins source precedence, and an instance
+// that declares nothing clears only values it previously declared.
+func applyRequestGroupConfig(n *reg.Node, req *cluster.RegisterRequest) {
+	n.AllowGroups = oidc.MergeGroups(req.AllowGroups)
+	n.AllowGroupRoles = sanitizeAllowGroupRoles(req.AllowGroupRoles)
+
+	if req.GroupsFullView {
+		v := true
+		n.GroupsFullView = &v
+	} else {
+		n.GroupsFullView = nil
+	}
+
+	n.GroupsSrc = entity.ClientGroupsSrcNode
+}
+
+// sanitizeAllowGroupRoles normalizes an instance-declared group → role mapping,
+// dropping malformed keys and non-instance roles instead of failing the
+// registration — declarative env config must not turn a typo into a boot loop.
+func sanitizeAllowGroupRoles(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(in))
+
+	for group, roleName := range in {
+		g := oidc.NormalizeGroupID(group)
+
+		if g == "" {
+			continue
+		}
+
+		role, ok := acl.ClusterInstanceRole(roleName)
+
+		if !ok {
+			continue
+		}
+
+		out[g] = role.String()
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
+}
+
+// buildPortalLoginURL returns the Portal's browser-facing login page URL
+// (SiteUrl origin + login route) reported to nodes at registration, so an
+// instance can land cluster sign-outs on the Portal login without pinning a
+// return_to. A custom absolute LoginUri is returned as-is.
+func buildPortalLoginURL(conf *config.Config) string {
+	if conf == nil {
+		return ""
+	}
+
+	path := conf.LoginUri()
+
+	if strings.Contains(path, "://") {
+		return path
+	}
+
+	origin := scheme.OriginURL(conf.SiteUrl())
+
+	if origin == "" {
+		return ""
+	}
+
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	return strings.TrimRight(origin, "/") + path
+}
+
+// normalizeRedirectURIs validates each entry and returns a deduplicated slice.
+// nil in = nil out ("no change"); non-nil in = non-nil out (replaces the persisted set).
+func normalizeRedirectURIs(in []string) ([]string, error) {
+	if in == nil {
+		return nil, nil
+	}
+
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+
+	for _, raw := range in {
+		uri := strings.TrimSpace(raw)
+		if uri == "" {
+			continue
+		}
+		if !validateRedirectURI(uri) {
+			return nil, fmt.Errorf("invalid redirect uri: %s", clean.Log(uri))
+		}
+		if _, dup := seen[uri]; dup {
+			continue
+		}
+		seen[uri] = struct{}{}
+		out = append(out, uri)
+	}
+
+	return out, nil
+}
+
+// validateRedirectURI accepts HTTPS or loopback / cluster-internal HTTP, with a host and no fragment.
+func validateRedirectURI(u string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(u))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	if parsed.Fragment != "" {
+		return false
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+
+	if parsed.Scheme == "https" {
+		return true
+	}
+
+	if parsed.Scheme == "http" {
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" || isClusterServiceHost(host) {
+			return true
+		}
 	}
 
 	return false

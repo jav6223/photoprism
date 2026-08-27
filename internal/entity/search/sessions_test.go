@@ -13,7 +13,9 @@ import (
 func TestSessions(t *testing.T) {
 	expectedUserUid := "uqxetse3cy5eo9z2"
 	expectedUserName := "alice"
-	expectedSessionId := "fde4d5154d5383370c9f0c21fd51655d54a185a26dc043d1866fc4678e7ecb62"
+	// First of alice's sessions ordered by ClientName: the "alice_app_password"
+	// app-password fixture (application provider, default method).
+	expectedSessionId := "84ced4d6b1b9e5db31d4ad5364d9b7da6b2a0e85372a46df9784852d8ada6e48"
 
 	t.Run("Default", func(t *testing.T) {
 		if results, err := Sessions(form.SearchSessions{}); err != nil {
@@ -100,6 +102,18 @@ func TestSessions(t *testing.T) {
 			if len(results) > 0 {
 				assert.Equal(t, "friend", results[0].UserName)
 				assert.Equal(t, "bob", results[1].UserName)
+			}
+		}
+	})
+	t.Run("SortByLoginAtReverse", func(t *testing.T) {
+		if results, err := Sessions(form.SearchSessions{Count: 100, Offset: 2, Order: sortby.LoginAt, Reverse: true}); err != nil {
+			t.Fatal(err)
+		} else {
+			// t.Logf("sessions: %#v", results)
+			assert.LessOrEqual(t, 1, len(results))
+			if len(results) > 0 {
+				assert.Equal(t, "Analytics", results[0].ClientName)
+				assert.Equal(t, "Invalid", results[1].ClientName)
 			}
 		}
 	})

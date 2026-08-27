@@ -20,6 +20,7 @@ The API package exposes PhotoPrism’s HTTP endpoints via Gin handlers. Each fil
 - Query and persist data through the corresponding services or repositories; avoid ad-hoc SQL or GORM usage in handlers when dedicated functions exist elsewhere.
 - Surface pagination consistently with `count`, `offset`, and `limit` following the defaults (100 max 1000). Validate `offset >= 0` and clamp `count` to the allowed range.
 - When responses need role-specific fields, build DTOs that redact sensitive data for non-admin roles so the handler stays deterministic.
+- **JSON field casing:** use **TitleCase** field names (`UUID`, `Name`, `SiteUrl`, `CreatedAt`) for request/response bodies that correspond to a database entity (mirroring the entity/model, e.g. the cluster `Node` and `ClusterInstance` DTOs), and **camelCase** (`storageNamespace`, `redirectUri`) for generated or artificial payloads that do not map to a specific entity — client config, session responses, and action/RPC bodies. A filtered or computed projection of an entity stays TitleCase; an action payload that operates on an entity stays camelCase but MAY TitleCase the single identity field that mirrors the entity (e.g. a `UUID`).
 
 ### Security & Middleware
 
@@ -30,6 +31,7 @@ The API package exposes PhotoPrism’s HTTP endpoints via Gin handlers. Each fil
 - Enforce rate limiting with the shared limiters (`limiter.Auth`, `limiter.Login`) and respond with `limiter.AbortJSON` to maintain consistent 429 JSON payloads.
 - Derive client IPs through `api.ClientIP` and extract bearer tokens with `header.BearerToken` or the helper setters. Use constant-time comparison for tokens and secrets.
 - For downloads or proxy endpoints, validate URLs against allowed schemes (`http`, `https`) and reject private or loopback addresses unless explicitly required.
+- **Upload-time NSFW screening (`users_upload.go`)** — when `PHOTOPRISM_UPLOAD_NSFW=false`, the upload handler runs `vision.DetectNSFW` against every accepted file and deletes any file flagged above the NSFW threshold before it reaches `originals/`. The check is skipped entirely when `UPLOAD_NSFW=true` (default). See [`internal/ai/nsfw/README.md`](../ai/nsfw/README.md) for the full NSFW call-graph and flag matrix.
 
 ### Audit Logging
 
@@ -56,6 +58,28 @@ The API package exposes PhotoPrism’s HTTP endpoints via Gin handlers. Each fil
       status.Error(err),
   }, refID)
   ```
+
+### User-Visible Notifications vs Audit Log
+
+`event.AuditInfo` / `AuditWarn` / `AuditErr` write to the audit log and broadcast on `audit.log.<level>` — the toast component on the frontend does NOT subscribe to that channel, so an audit entry alone produces no UI feedback. To raise a red or green toast in the browser, publish on the `notify.*` channel via `event.Error(msg)` / `event.ErrorMsg(id, …)` (red) or `event.Success(msg)` (green).
+
+The two helpers have distinct subscribers; choose based on who the message is for:
+
+- **Short endpoints whose response the frontend reads** (single-shot CRUD, login, settings updates). The calling component renders the response, so `AuditErr` plus an HTTP error is enough — the UI gets the error string from the response body.
+- **Long-running endpoints that the UI drives via the event hub** (`POST /api/v1/index`, `POST /api/v1/import/*path`, and similar). The frontend cancels the in-flight HTTP request on the first `index.*` / `import.*` wire event, so the response body is invisible in normal operation. In-flight failures that need a specific toast MUST be published via `event.ErrorMsg(...)` on `notify.error`; an HTTP error alone produces only the frontend's generic fallback toast (or nothing, if the cancel has already fired).
+- **Forensic events that don't need UI surfacing** (rate limiting, ACL denials, internal aborts whose user-visible signal comes from a sibling channel). `AuditErr` alone is the right call.
+
+When in doubt, ask: "after this handler returns, what does the user see?" If the answer is "the frontend will read the response", `AuditErr` covers it. If the answer is "the page is already subscribed to wire events and the response is discarded", publish on `notify.*` as well.
+
+```go
+// Forensic audit only — frontend will read the response body and render the error.
+event.AuditErr([]string{ClientIP(c), "session %s", "delete album", status.Failed}, s.RefID)
+AbortBadRequest(c, err)
+
+// Forensic audit + specific red toast — needed when the request was already canceled by the wire.
+event.AuditErr([]string{ClientIP(c), "session %s", "index files", status.Failed}, s.RefID)
+event.ErrorMsg(i18n.ErrIndexingFailed)
+```
 
 ### Swagger Documentation
 

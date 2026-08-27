@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build Commands
 
-Run `make help` to list all available targets. Key commands:
+Run `make help` for an overview of the most common targets, and `make list` to list all of them. Key commands:
 
 **Backend (Go):**
 - `make build-go` — build the `photoprism` binary (develop mode)
@@ -27,10 +27,14 @@ Run `make help` to list all available targets. Key commands:
 ## Testing
 
 **Run all tests:**
-- `make test` — runs both JS and Go tests
-- `make test-go` — all Go tests (slow, ~20 min)
+- `make test` — runs the JS and Go tests on SQLite; it does not cover MariaDB or the editions
+- `make test-go` — all Go tests on SQLite (~3-15 min)
+- `make test-mariadb` — the same Go suite against MariaDB (~5-20 min)
 - `make test-js` — frontend unit tests (Vitest)
-- `make test-short` — short Go tests in parallel (~5 min)
+- `make test-short` — short Go tests in parallel (~2-5 min)
+
+Go runs packages concurrently, so wall-clock time depends on the core count, on how warm the
+build cache is, and on what else is using the host. Treat the ranges as orders of magnitude.
 
 **Run targeted Go tests:**
 ```bash
@@ -43,27 +47,36 @@ go test ./internal/entity/... -count=1 -tags="slow,develop"
 - `make vitest-watch` — Vitest in watch mode
 - `make vitest-coverage` — Vitest with coverage report
 
-**Reset test databases before running Go tests:**
-- `make reset-testdb` — clears SQLite test DBs and MariaDB testdb
+**Run the Go tests against MariaDB:**
+- `make test-mariadb` runs the suite against MariaDB instead of SQLite. Each package gets its
+  own database, and the target resets them via `reset-acceptance` before it starts.
+- The editions are not covered by the root target and each need their own run:
+  `make -C plus test-mariadb`, `make -C pro test-mariadb`, `make -C portal test-mariadb`.
+- For a targeted run, export the same `PHOTOPRISM_TEST_DRIVER` and `PHOTOPRISM_TEST_DSN` that
+  `run-test-mariadb` sets in the `Makefile`, then call `go test` on the packages you want.
+
+**Reset test databases:**
+- `make reset-testdb` — the one to reach for: deletes the SQLite test database files, including
+  the `-journal`, `-wal` and `-shm` sidecars, and drops the MariaDB databases the Go tests use.
+- `make reset-acceptance` — drops the MariaDB test databases only. `make test-mariadb` runs it
+  automatically; call it by hand after a targeted or interrupted MariaDB run.
+- `make reset-sqlite` — removes the SQLite test files only.
 
 **Subset targets:** `make test-pkg`, `make test-api`, `make test-entity`, `make test-commands`, `make test-photoprism`, `make test-ai`
 
 ## Formatting & Linting
 
-- `make fmt` — format everything (Go + JS + Swagger)
-- `make fmt-go` — runs `go fmt`, `gofmt -w -s`, then `goimports -w -local "github.com/photoprism"` on `pkg/`, `internal/`, `cmd/`
-- `make fmt-js` — runs ESLint + Prettier via `npm run fmt` in `frontend/`
-- `make fmt-swag` / `make swag` — format and regenerate Swagger docs (`internal/api/swagger.json`)
-- `make lint-go` — runs golangci-lint (prints findings without failing due to `--issues-exit-code 0`)
-- `make lint-js` — runs ESLint/Prettier for frontend
+Available targets: `make fmt` (everything), `make fmt-go`, `make fmt-js`, `make fmt-swag` / `make swag` (Swagger), `make lint-go`, `make lint-js`. Detailed conventions live in `.claude/rules/go-code-style.md` and `.claude/rules/frontend-rules.md`.
 
-Always run `make fmt-go` before committing Go changes and `make fmt-js` before committing frontend changes.
-When creating or editing shell scripts, run `shellcheck <file>` and resolve warnings.
+When creating or editing shell scripts, run `shellcheck <file>` and resolve warnings. When editing Markdown files that contain tables, format them with `npx --yes markdown-table-formatter <filename>`.
 
-When editing or creating Markdown files that contain tables, format them with:
-```bash
-npx --yes markdown-table-formatter <filename>
-```
+The curated `make help` overviews are maintained by hand in a `HELP_TEXT` block per Makefile. After renaming or removing a target, run `make check-make-help` (also part of `make lint`) to confirm that no overview still advertises it.
+
+## Continuous Integration
+
+**GitHub Actions is not enabled for this repository.** The workflow files under `.github/workflows/` do not execute, so pushes and pull requests produce no check runs. Treat them as dormant configuration: do not diagnose the absence of runs as a broken workflow, do not propose enabling Actions, and do not add workflows or bot configuration that assumes they will run. Ask a maintainer before changing anything under `.github/workflows/`.
+
+The `make` targets above are the authoritative build, format, and test gate — run them locally and report the output rather than relying on a hosted runner.
 
 ## Schema Migrations
 
@@ -114,19 +127,17 @@ PhotoPrism is a self-hosted photo management app. The backend is Go, the fronten
 
 Vue 3 app using the Options API and Vuetify 3.
 
-| Directory                 | Purpose                                                                     |
-|---------------------------|-----------------------------------------------------------------------------|
-| `frontend/src/model/`     | Client-side models mirroring API responses (Photo, Album, File, User, etc.) |
-| `frontend/src/app/`       | App bootstrap, Vuex store, routing                                          |
-| `frontend/src/page/`      | Page-level components                                                       |
-| `frontend/src/component/` | Reusable UI components                                                      |
-| `frontend/src/common/`    | Shared utilities and API client                                             |
-| `frontend/src/locales/`   | i18n translation files                                                      |
-| `frontend/tests/`         | Vitest unit tests + TestCafe acceptance tests                               |
+| Directory                 | Purpose                                                                                         |
+|---------------------------|-------------------------------------------------------------------------------------------------|
+| `frontend/src/model/`     | Client-side models mirroring API responses (Photo, Album, File, User, etc.)                     |
+| `frontend/src/app/`       | App bootstrap, routing (`routes.js`), and the `$session` reactive singleton                     |
+| `frontend/src/page/`      | Page-level components                                                                           |
+| `frontend/src/component/` | Reusable UI components                                                                          |
+| `frontend/src/common/`    | Shared utilities, the API client (`$api`), and reactive singletons (`$config`, `$view`, `$log`) |
+| `frontend/src/locales/`   | i18n translation files                                                                          |
+| `frontend/tests/`         | Vitest unit tests + TestCafe acceptance tests                                                   |
 
-- Use the Options API consistently; do not introduce Composition API.
-- Keep all UI strings translatable; never hardcode locale strings.
-- Follow existing Vuex store patterns for state management.
+State management uses reactive singleton modules in `src/common/` and `src/app/`, not Vuex or Pinia. Frontend code-style, formatting, testing, translation, and Playwright rules live in `.claude/rules/frontend-rules.md`.
 
 ### API Conventions
 
@@ -145,15 +156,17 @@ Verify config option names before using them:
 ./photoprism show config-yaml
 ```
 
-### Commit Messages
+### Verify Before Propagating
 
-Use concise, imperative subjects with a one-word prefix indicating scope (e.g. `Config: Add tests for "darktable-cli" path detection`). Reference issue/PR IDs when relevant (e.g. `Docker: Use two stage build #123`). Commit messages must not exceed 80 characters.
+Before promoting a claim from `CLAUDE.md`, `AGENTS.md`, a memory entry, or another spec into a new rule, spec, code comment, or commit message, verify it against the current code (grep imports, list directories, read the cited file). Stale documentation silently turns into stale rules and stale specs that future sessions will trust. When the claim names a package, function, file, or framework, the cost of one grep is much smaller than the cost of repeating an error across multiple files.
 
-Do not add `Co-Authored-By: Claude …` trailers to commit messages.
+### Detailed Rules
 
-### Key Style Notes
+Topic-specific conventions live under `.claude/rules/` and are loaded alongside this file:
 
-- **Go**: idiomatic Go, small functions, wrapped errors with context, minimal public surface area. Use `goimports` with `-local "github.com/photoprism"` to group imports. Code in `pkg/*` MUST NOT import from `internal/*`.
-- **Tests**: use `config.TestConfig()` for shared fixtures or `config.NewMinimalTestConfigWithDb("<name>", t.TempDir())` for isolated test DBs. Use build tags `-tags="slow,develop"` for the full test suite. Do not run multiple test commands in parallel (shared fixtures/DB).
-- **Destructive CLI commands** (`photoprism reset`, `users reset`, `auth reset`, `audit reset`) require explicit `--yes` and should never be used in examples without backup warnings.
-- **Safety**: Never commit secrets or local configs. Do not run `git config`. Do not run destructive commands against production data.
+- `code-comments.md` — shared JS/Go doc comment rules (length cap, what to omit); referenced by both style files.
+- `go-code-style.md`, `go-testing.md` — Go style, package boundaries, test patterns, fixtures.
+- `frontend-rules.md` — JS/Vue code style, formatting, dependencies, tests, Playwright, translations.
+- `commit-and-docs-style.md` — commit-message format, GitHub issue templates, spec heading style.
+- `safety-and-security.md` — Git/data safety, destructive commands, file I/O and archive-extraction policies, HTTP download helpers.
+- `api-and-config.md`, `cluster-operations.md`, `import-index-download.md`, `build-and-runtime.md`, `sources-of-truth.md` — domain-specific guidance.

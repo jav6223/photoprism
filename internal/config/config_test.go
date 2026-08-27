@@ -1,17 +1,22 @@
 package config
 
 import (
+	"bytes"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v2"
 
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/service/hub"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 // ProjectRoot references the project root directory for use in tests.
@@ -22,23 +27,27 @@ func init() {
 	hub.ApplyTestConfig()
 }
 
+// TestMain executes runTestMain returning it's results.  It is done this way so that defer can be used to cleanup.
 func TestMain(m *testing.M) {
+	os.Exit(runTestMain(m))
+}
+
+func runTestMain(m *testing.M) int {
 	_ = os.Setenv("PHOTOPRISM_TEST", "true")
 	log = logrus.StandardLogger()
 	log.SetLevel(logrus.TraceLevel)
 
 	c := TestConfig()
+	defer c.CleanupTestFolder()
+	defer func() {
+		if err := c.CloseDb(); err != nil {
+			log.Warnf("close db: %v", err)
+		}
+		// Remove temporary SQLite files after running the tests.
+		fs.PurgeTestDbFiles(".", false)
+	}()
 
-	code := m.Run()
-
-	// Remove temporary SQLite files after running the tests.
-	if err := c.CloseDb(); err != nil {
-		log.Warnf("close db: %v", err)
-	}
-
-	fs.PurgeTestDbFiles(".", false)
-
-	os.Exit(code)
+	return m.Run()
 }
 
 func TestNewConfig(t *testing.T) {
@@ -316,92 +325,134 @@ func TestConfig_ThemePath(t *testing.T) {
 	assert.Equal(t, ProjectRoot+"/storage/testdata/config/theme", c.ThemePath())
 }
 
-func TestConfig_IndexWorkers(t *testing.T) {
-	c := NewConfig(CliTestContext())
-
-	assert.GreaterOrEqual(t, c.IndexWorkers(), 1)
-}
-
-func TestConfig_IndexSchedule(t *testing.T) {
-	c := NewConfig(CliTestContext())
-	assert.Equal(t, DefaultIndexSchedule, c.IndexSchedule())
-}
-
-func TestConfig_WakeupInterval(t *testing.T) {
-	c := NewConfig(CliTestContext())
-	i := c.WakeupInterval()
-
-	assert.Equal(t, "1h34m9s", c.WakeupInterval().String())
-
-	c.options.WakeupInterval = 45
-
-	assert.Equal(t, "45s", c.WakeupInterval().String())
-
-	c.options.WakeupInterval = 0
-
-	assert.Equal(t, "15m0s", c.WakeupInterval().String())
-
-	c.options.WakeupInterval = 150
-
-	assert.Equal(t, "2m30s", c.WakeupInterval().String())
-
-	c.options.WakeupInterval = i
-
-	assert.Equal(t, "1h34m9s", c.WakeupInterval().String())
-}
-
-func TestConfig_AutoIndex(t *testing.T) {
-	c := NewConfig(CliTestContext())
-	assert.Equal(t, -1*time.Second, c.AutoIndex())
-}
-
-func TestConfig_AutoImport(t *testing.T) {
-	c := NewConfig(CliTestContext())
-	assert.Equal(t, 2*time.Hour, c.AutoImport())
-}
-
-func TestConfig_OriginalsLimit(t *testing.T) {
-	c := NewConfig(CliTestContext())
-
-	assert.Equal(t, -1, c.OriginalsLimit())
-	c.options.OriginalsLimit = 800
-	assert.Equal(t, 800, c.OriginalsLimit())
-}
-
-func TestConfig_OriginalsLimitBytes(t *testing.T) {
-	c := NewConfig(CliTestContext())
-
-	assert.Equal(t, int64(-1), c.OriginalsLimitBytes())
-	c.options.OriginalsLimit = 800
-	assert.Equal(t, int64(838860800), c.OriginalsLimitBytes())
-}
-
-func TestConfig_ResolutionLimit(t *testing.T) {
-	c := NewConfig(CliTestContext())
-
-	assert.Equal(t, DefaultResolutionLimit, c.ResolutionLimit())
-	c.options.ResolutionLimit = 800
-	assert.Equal(t, 800, c.ResolutionLimit())
-	c.options.ResolutionLimit = 950
-	assert.Equal(t, 900, c.ResolutionLimit())
-	c.options.ResolutionLimit = 0
-	assert.Equal(t, DefaultResolutionLimit, c.ResolutionLimit())
-	c.options.ResolutionLimit = -1
-	assert.Equal(t, -1, c.ResolutionLimit())
-	c.options.Sponsor = false
-	assert.Equal(t, -1, c.ResolutionLimit())
-	c.options.Sponsor = true
-	assert.Equal(t, -1, c.ResolutionLimit())
-}
-
 func TestConfig_Serial(t *testing.T) {
-	c := NewConfig(CliTestContext())
+	c := TestConfig() // Use complete test context, as NewConfig may not have the required file.
 
 	result := c.Serial()
 
 	t.Logf("Serial: %s", result)
 
 	assert.NotEmpty(t, result)
+}
+
+func TestReadSerialFile(t *testing.T) {
+	valid := rnd.GenerateUID(serialPrefix)
+	write := func(t *testing.T, data string) string {
+		t.Helper()
+		fileName := filepath.Join(t.TempDir(), serialName)
+		require.NoError(t, os.WriteFile(fileName, []byte(data), fs.ModeSecretFile))
+		return fileName
+	}
+	t.Run("Valid", func(t *testing.T) {
+		assert.Equal(t, valid, readSerialFile(write(t, valid)))
+	})
+	t.Run("TrailingNewline", func(t *testing.T) {
+		// A stray newline must not discard the serial, as that would rotate the derived preview token.
+		assert.Equal(t, valid, readSerialFile(write(t, valid+"\n")))
+	})
+	t.Run("Missing", func(t *testing.T) {
+		assert.Empty(t, readSerialFile(filepath.Join(t.TempDir(), serialName)))
+	})
+	t.Run("Truncated", func(t *testing.T) {
+		assert.Empty(t, readSerialFile(write(t, valid[:8])))
+	})
+	t.Run("WrongPrefix", func(t *testing.T) {
+		assert.Empty(t, readSerialFile(write(t, "a"+valid[1:])))
+	})
+	t.Run("NotAlnum", func(t *testing.T) {
+		assert.Empty(t, readSerialFile(write(t, "z!!!!!!!!!!!!!!!")))
+	})
+	t.Run("Empty", func(t *testing.T) {
+		assert.Empty(t, readSerialFile(write(t, "")))
+	})
+}
+
+func TestConfig_InitSerial(t *testing.T) {
+	t.Run("GeneratesAndPersists", func(t *testing.T) {
+		c := NewMinimalTestConfig(t.TempDir())
+		require.NoError(t, c.CreateDirectories())
+		require.NoError(t, c.InitSerial())
+		serial := c.Serial()
+		assert.True(t, rnd.IsUID(serial, serialPrefix))
+		// Written to the storage path and mirrored to the backup path, both readable back.
+		assert.Equal(t, serial, readSerialFile(filepath.Join(c.StoragePath(), serialName)))
+		assert.Equal(t, serial, readSerialFile(c.BackupPath(serialName)))
+		// Stable across calls: an existing serial is never regenerated.
+		require.NoError(t, c.InitSerial())
+		assert.Equal(t, serial, c.Serial())
+	})
+	t.Run("RecoversFromBackup", func(t *testing.T) {
+		c := NewMinimalTestConfig(t.TempDir())
+		require.NoError(t, c.CreateDirectories())
+		require.NoError(t, c.InitSerial())
+		serial := c.Serial()
+		// Losing the storage copy must not change the serial, or every preview URL would break.
+		require.NoError(t, os.Remove(filepath.Join(c.StoragePath(), serialName)))
+		c.serial = ""
+		assert.Equal(t, serial, c.Serial())
+	})
+	t.Run("BackupFailureIsNotFatal", func(t *testing.T) {
+		c := NewMinimalTestConfig(t.TempDir())
+		require.NoError(t, c.CreateDirectories())
+		// Block the backup copy by putting a directory where the file belongs; startup must continue,
+		// since the backup only adds redundancy.
+		require.NoError(t, os.MkdirAll(c.BackupPath(serialName), fs.ModeDir))
+		assert.NoError(t, c.InitSerial())
+		assert.True(t, rnd.IsUID(c.Serial(), serialPrefix))
+	})
+}
+
+func TestConfig_reportDownloadTokenOptions(t *testing.T) {
+	// capture swaps the console-only system logger for a buffer, so the assertions do not depend on the
+	// application log level or on what another test left behind.
+	capture := func(t *testing.T) *bytes.Buffer {
+		t.Helper()
+		var buf bytes.Buffer
+		logger := logrus.New()
+		logger.Out = &buf
+		logger.SetLevel(logrus.InfoLevel)
+		origLog := event.SystemLog
+		event.SystemLog = logger
+		t.Cleanup(func() { event.SystemLog = origLog })
+		return &buf
+	}
+	newConfig := func(downloadToken string, public bool) *Config {
+		c := NewMinimalTestConfig(t.TempDir())
+		c.options.Public = public
+		c.options.Demo = false
+		c.options.DownloadToken = downloadToken
+		return c
+	}
+	t.Run("StaticTokenConfigured", func(t *testing.T) {
+		buf := capture(t)
+		newConfig("static-download-token", false).reportDownloadTokenOptions()
+		// Reported at warning level so it stands out in an operator's log, and named after the option so
+		// it can be traced back to the setting that caused it.
+		assert.Contains(t, buf.String(), "level=warning")
+		assert.Contains(t, buf.String(), "config: download-token")
+		assert.Contains(t, buf.String(), "without identifying a session")
+	})
+	t.Run("NotConfigured", func(t *testing.T) {
+		buf := capture(t)
+		newConfig("", false).reportDownloadTokenOptions()
+		assert.Empty(t, buf.String())
+	})
+	t.Run("PublicMode", func(t *testing.T) {
+		// Nothing is scoped in public mode, so the trade-off does not apply.
+		buf := capture(t)
+		newConfig("static-download-token", true).reportDownloadTokenOptions()
+		assert.Empty(t, buf.String())
+	})
+	t.Run("MaxAgeBelowMinimum", func(t *testing.T) {
+		buf := capture(t)
+		c := newConfig("", false)
+		c.options.DownloadTokenMaxAge = 60
+		c.reportDownloadTokenOptions()
+		// Names both the configured value and the floor it was raised to, so the operator can see what
+		// the instance actually uses; the clamp itself is covered by TestConfig_DownloadTokenMaxAge.
+		assert.Contains(t, buf.String(), "config: download-token-maxage")
+		assert.Contains(t, buf.String(), "60s is below the 900s minimum")
+	})
 }
 
 func TestConfig_SerialChecksum(t *testing.T) {
@@ -526,4 +577,149 @@ func TestConfigOptions(t *testing.T) {
 
 	assert.Equal(t, r2.AutoImport, 0)
 	assert.Equal(t, r2.AutoIndex, 0)
+}
+
+// TestConfig_SaveOptionsPatchAppliesOnlyThePatch pins that writing one option does not import
+// every other key the file holds over options a flag or another writer provided for this run.
+// Reading the file back is how recording a face model came to replace a live database
+// configuration, which surfaces as a hang rather than an error: the DSN never resolves and the
+// connection is retried instead of failing.
+func TestConfig_SaveOptionsPatchAppliesOnlyThePatch(t *testing.T) {
+	tempCfg := t.TempDir()
+	c := NewConfig(CliTestContext())
+	c.options.ConfigPath = tempCfg
+	c.options.OptionsYaml = filepath.Join(tempCfg, "options.yml")
+
+	seed := Values{"DatabaseDriver": "mysql", "DatabaseServer": "database:3306"}
+	b, err := yaml.Marshal(seed)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(c.OptionsYaml(), b, fs.ModeFile))
+
+	c.options.DatabaseDriver = "sqlite3"
+	c.options.DatabaseServer = ""
+
+	wrote, err := c.SaveOptionsPatch(Values{"FaceModel": "sface"})
+	require.NoError(t, err)
+	require.True(t, wrote)
+
+	assert.Equal(t, "sface", c.options.FaceModel, "the patched key must be applied")
+	assert.Equal(t, "sqlite3", c.options.DatabaseDriver, "an unpatched key must not be read back")
+	assert.Empty(t, c.options.DatabaseServer)
+}
+
+// TestConfig_SaveOptionsPatchTypesValues pins that an integer option persists as an integer,
+// so that the file and the running configuration cannot end up holding different numbers.
+func TestConfig_SaveOptionsPatchTypesValues(t *testing.T) {
+	newTestConfig := func(t *testing.T) *Config {
+		t.Helper()
+
+		tempCfg := t.TempDir()
+		c := NewConfig(CliTestContext())
+		c.options.ConfigPath = tempCfg
+		c.options.OptionsYaml = filepath.Join(tempCfg, "options.yml")
+
+		return c
+	}
+
+	t.Run("Success", func(t *testing.T) {
+		c := newTestConfig(t)
+
+		wrote, err := c.SaveOptionsPatch(Values{"JpegQuality": 85.61960784313726})
+		require.NoError(t, err)
+		require.True(t, wrote)
+
+		assert.Equal(t, 86, c.options.JpegQuality)
+
+		b, err := os.ReadFile(c.OptionsYaml())
+		require.NoError(t, err)
+		assert.Contains(t, string(b), "JpegQuality: 86")
+		assert.NotContains(t, string(b), "85.61960784313726")
+
+		// The value must survive a reload as the number that was written.
+		values := Values{}
+		require.NoError(t, yaml.Unmarshal(b, &values))
+		assert.EqualValues(t, 86, values["JpegQuality"])
+	})
+	t.Run("InvalidRequest", func(t *testing.T) {
+		c := newTestConfig(t)
+
+		wrote, err := c.SaveOptionsPatch(Values{"JpegQuality": math.NaN()})
+		assert.ErrorIs(t, err, ErrInvalidOptionValue)
+		assert.False(t, wrote)
+		assert.NoFileExists(t, c.OptionsYaml(), "a rejected patch must not write the file")
+	})
+}
+
+func TestConfig_DeleteOptionsPatch(t *testing.T) {
+	newTestOptions := func(t *testing.T, values Values) *Config {
+		t.Helper()
+
+		tempCfg := t.TempDir()
+		c := NewConfig(CliTestContext())
+		c.options.ConfigPath = tempCfg
+		c.options.OptionsYaml = filepath.Join(tempCfg, "options.yml")
+
+		b, err := yaml.Marshal(values)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(c.OptionsYaml(), b, fs.ModeFile))
+
+		return c
+	}
+
+	t.Run("Success", func(t *testing.T) {
+		// Removing a key restores the default, which writing an empty value does not: the loader
+		// cannot tell an option that was cleared from one that was set to nothing.
+		c := newTestOptions(t, Values{"FaceModel": "facenet", "SiteUrl": "https://photos.example.com/"})
+
+		wrote, err := c.DeleteOptionsPatch("FaceModel")
+		require.NoError(t, err)
+		assert.True(t, wrote)
+
+		content, readErr := os.ReadFile(c.OptionsYaml())
+		require.NoError(t, readErr)
+
+		var merged map[string]any
+		require.NoError(t, yaml.Unmarshal(content, &merged))
+		assert.NotContains(t, merged, "FaceModel")
+		assert.Equal(t, "https://photos.example.com/", merged["SiteUrl"])
+	})
+	t.Run("KeyNotPresent", func(t *testing.T) {
+		c := newTestOptions(t, Values{"SiteUrl": "https://photos.example.com/"})
+
+		wrote, err := c.DeleteOptionsPatch("FaceModel")
+		require.NoError(t, err)
+		assert.False(t, wrote, "a file that would not change must not be rewritten")
+	})
+	t.Run("MissingFileCreatesNothing", func(t *testing.T) {
+		// A helper that removes a setting must not leave a directory tree behind as its only
+		// effect, which reading the file through loadOptionsYAML would do.
+		c := NewConfig(CliTestContext())
+		c.options.ConfigPath = filepath.Join(t.TempDir(), "absent")
+		c.options.OptionsYaml = filepath.Join(c.options.ConfigPath, "options.yml")
+
+		wrote, err := c.DeleteOptionsPatch("FaceModel")
+
+		require.NoError(t, err)
+		assert.False(t, wrote)
+		assert.NoDirExists(t, c.options.ConfigPath)
+	})
+	t.Run("NoKeys", func(t *testing.T) {
+		c := newTestOptions(t, Values{"SiteUrl": "https://photos.example.com/"})
+
+		wrote, err := c.DeleteOptionsPatch()
+		assert.NoError(t, err)
+		assert.False(t, wrote)
+	})
+	t.Run("UnreadableFile", func(t *testing.T) {
+		c := newTestOptions(t, Values{"FaceModel": "facenet"})
+		require.NoError(t, os.WriteFile(c.OptionsYaml(), []byte("\tnot: [yaml"), fs.ModeFile))
+
+		_, err := c.DeleteOptionsPatch("FaceModel")
+		assert.Error(t, err)
+	})
+	t.Run("NilConfig", func(t *testing.T) {
+		wrote, err := (*Config)(nil).DeleteOptionsPatch("FaceModel")
+		assert.NoError(t, err)
+		assert.False(t, wrote)
+	})
 }

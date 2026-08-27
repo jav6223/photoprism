@@ -2,14 +2,17 @@ package entity
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/ai/classify"
 	"github.com/photoprism/photoprism/internal/form"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/media"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/time/tz"
@@ -1374,7 +1377,7 @@ func TestPhoto_SetPrimary(t *testing.T) {
 	t.Run("UpdateQualityErrorIsNonFatal", func(t *testing.T) {
 		originalProvider := dbConn
 		tempConn := &DbConn{
-			Driver: SQLite3,
+			Driver: dsn.DriverSQLite3,
 			Dsn:    fmt.Sprintf("%s/%s", t.TempDir(), "set-primary-quality-error.db"),
 		}
 
@@ -1644,10 +1647,43 @@ func TestPhoto_ArchiveRestore(t *testing.T) {
 }
 
 func TestPhoto_SetCameraSerial(t *testing.T) {
-	m := &Photo{}
-	assert.Empty(t, m.CameraSerial)
-	m.SetCameraSerial("abcCamera")
-	assert.Equal(t, "abcCamera", m.CameraSerial)
+	t.Run("Success", func(t *testing.T) {
+		m := &Photo{}
+		assert.Empty(t, m.CameraSerial)
+		m.SetCameraSerial("abcCamera")
+		assert.Equal(t, "abcCamera", m.CameraSerial)
+	})
+	t.Run("MultiByteClippedOnRuneBoundary", func(t *testing.T) {
+		// camera_serial is VARBINARY(160), so a long multi-byte value must be byte-clipped
+		// without splitting a rune, keeping the stored value within budget and valid UTF-8.
+		m := &Photo{}
+		m.SetCameraSerial(strings.Repeat("世", 100)) // 100 runes x 3 bytes = 300 bytes.
+		assert.NotEmpty(t, m.CameraSerial)
+		assert.LessOrEqual(t, len(m.CameraSerial), txt.ClipDefault)
+		assert.True(t, utf8.ValidString(m.CameraSerial))
+	})
+}
+
+func TestPhoto_SetDocumentID(t *testing.T) {
+	t.Run("Stored", func(t *testing.T) {
+		m := &Photo{}
+		m.SetDocumentID("adobe:docid:photoshop:7d592d87-eb1e-1040-809a-e16c6b85b3fd")
+		assert.Equal(t, "adobe:docid:photoshop:7d592d87-eb1e-1040-809a-e16c6b85b3fd", m.UUID)
+	})
+	t.Run("EmptyKeepsCurrent", func(t *testing.T) {
+		m := &Photo{UUID: "xmp.did:keep"}
+		m.SetDocumentID("")
+		assert.Equal(t, "xmp.did:keep", m.UUID)
+	})
+	t.Run("OversizeClippedOnRuneBoundary", func(t *testing.T) {
+		// photos.uuid is VARBINARY(255), so an oversized multi-byte DocumentID must be
+		// clipped on a rune boundary, keeping the stored value within budget and valid UTF-8.
+		m := &Photo{}
+		m.SetDocumentID(strings.Repeat("世", 100)) // 100 runes x 3 bytes = 300 bytes.
+		assert.NotEmpty(t, m.UUID)
+		assert.LessOrEqual(t, len(m.UUID), UUIDBytes)
+		assert.True(t, utf8.ValidString(m.UUID))
+	})
 }
 
 func TestPhoto_MapKey(t *testing.T) {

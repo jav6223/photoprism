@@ -1,6 +1,6 @@
 PhotoPrism — Backend CODEMAP
 
-**Last Updated:** May 5, 2026
+**Last Updated:** August 20, 2026
 
 Purpose
 - Give agents and contributors a fast, reliable map of where things live and how they fit together, so you can add features, fix bugs, and write tests without spelunking.
@@ -38,6 +38,8 @@ High-Level Package Map (Go)
   - Label lookup helpers now live in `internal/entity/label*.go`; reuse `FindLabels(...)`, `FindLabelIDs(...)`, and `LabelSlugs(...)` for homophone-aware exact-name/slug resolution instead of duplicating slug SQL in callers.
 - `internal/photoprism` — core domain logic (indexing, import, faces, thumbnails, cleanup)
 - `internal/ai/vision` — multi-engine computer vision pipeline (models, adapters, schema). Adapter docs: [`internal/ai/vision/openai/README.md`](internal/ai/vision/openai/README.md) and [`internal/ai/vision/ollama/README.md`](internal/ai/vision/ollama/README.md).
+- `internal/ai/onnx` — shared ONNX model description: artifact identity and checksum, graph inspection and verification, preprocessing contract, runtime loading. Consumed today by `internal/ai/face`. See [`internal/ai/onnx/README.md`](internal/ai/onnx/README.md).
+- `internal/ai/face` — face detection and embedding: the detector registry selected by `FACE_DETECTOR`, the embedding-model registry selected by `FACE_MODEL`, landmark alignment, and distance thresholds. See [`internal/ai/face/README.md`](internal/ai/face/README.md).
 - `internal/workers` — background schedulers (index, vision, sync, meta, backup)
 - `internal/auth` — ACL, sessions, OIDC
 - `internal/service` — cluster/portal, maps, hub, webdav
@@ -48,13 +50,13 @@ High-Level Package Map (Go)
     - Service timeouts apply to control operations (`Files`, `Directories`, `Mkdir`, `Delete`), while `Upload` and `Download` avoid total request deadlines and instead use connection-level safeguards.
 - `internal/event` — logging, pub/sub, audit; canonical outcome tokens live in `pkg/log/status` (use helpers like `status.Error(err)` when the sanitized message should be the outcome). Docs: `internal/event/README.md`.
 - `internal/ffmpeg`, `internal/thumb`, `internal/meta`, `internal/form`, `internal/mutex` — media, thumbs, metadata, forms, coordination. Docs: `internal/ffmpeg/README.md`, `internal/meta/README.md`.
-- `pkg/*` — reusable utilities (must never import from `internal/*`), e.g. `pkg/clean`, `pkg/enum`, `pkg/fs`, `pkg/txt`, `pkg/http/header`
+- `pkg/*` — reusable utilities (must never import from `internal/*`), e.g. `pkg/clean`, `pkg/enum`, `pkg/fs`, `pkg/txt`, `pkg/http/header`, `pkg/authn/authtoken`
 
 Templates & Static Assets
 - Entry HTML lives in `assets/templates/index.gohtml`, which includes the splash markup from `app.gohtml` and the SPA loader from `app.js.gohtml`.
 - OIDC login completion for the SPA is bridged through `assets/templates/auth.gohtml`, which clears legacy/namespaced session keys and writes the session into the preferred namespaced browser store selected by the login UI toggle in `frontend/src/page/auth/login.vue`.
 - The browser check logic resides in `assets/static/js/browser-check.js` and is included via `app.js.gohtml`; it performs capability checks (Promise, fetch, AbortController, `script.noModule`, etc.) before the main bundle runs.
-- Update this file (and the partial) in lockstep with `pro/assets/templates/index.gohtml`, `plus/assets/templates/index.gohtml`, and `portal/assets/templates/index.gohtml`, because those editions import the same partial.
+- Update this file (and the partial) in lockstep with `pro/assets/templates/index.gohtml` and `portal/assets/templates/index.gohtml`, because those editions import the same partial. Plus ships no template overlay and renders these templates unchanged.
 - Keep the script tag order unchanged so the browser check executes before the main bundle.
 - `splash.gohtml` renders the loading screen text while the bundle loads; styles are in `frontend/src/css/splash.css`.
 - When adjusting browser support messaging, update both the loader partial and splash styles so the warning message stays consistent across editions.
@@ -70,7 +72,7 @@ HTTP API
   - `make swag-json` runs a stabilization step (`swaggerfix`) removing duplicated enums for `time.Duration`; API uses integer nanoseconds for durations.
 - `/api/v1/metrics` (see `internal/api/metrics.go`) exposes Prometheus metrics, including cached filesystem/account usage derived from `config.Usage()`, registered user/guest totals, and portal cluster node counts when `NodeRole=portal`; the handler returns the standard Prometheus exposition content type (`text/plain; version=0.0.4`).
 - Common groups in `routes.go`: sessions, OAuth/OIDC, config, users, services, thumbnails, video, downloads/zip, index/import, photos/files/labels/subjects/faces, batch ops, cluster, technical (metrics, status, echo).
-- Hidden search behavior (used by the hidden route under the configured frontend URI, default `/library/hidden` for CE/Plus/Pro and `/portal/admin/hidden` for Portal) is implemented in `internal/entity/search/photos.go`:
+- Hidden search behavior (used by the hidden route under the configured frontend URI, default `/library/hidden` for CE/Plus/Pro and `/portal/hidden` for Portal) is implemented in `internal/entity/search/photos.go`:
   - `frm.Hidden` enforces `photos.photo_quality = -1` and `photos.deleted_at IS NULL`.
   - Non-hidden searches exclude errored files by default (`files.file_error = ''`) unless `frm.Error` is explicitly set.
 - Search DTOs in `internal/entity/search/photos_results.go` expose `FileError` (`files.file_error`) so clients can render hidden reasons without loading full file details first.
@@ -114,11 +116,13 @@ AuthN/Z & Sessions
   - `internal/entity/auth_session_jwt.go` builds transient sessions from portal-issued JWTs; used by `internal/api/api_auth_jwt.go` when nodes authenticate portal requests.
 - ACL: `internal/auth/acl/*` — roles, grants, scopes; use constants; avoid logging secrets, compare tokens constant‑time; for scope checks use `acl.ScopePermits` / `ScopeAttrPermits` instead of rolling your own parsing.
 - OIDC: `internal/auth/oidc/*`.
+- URL tokens (signed downloads, previews): `pkg/authn/authtoken` is the dependency-free primitive that mints/verifies the bunny.net-compatible HMAC-SHA256 token format (docs: `pkg/authn/authtoken/README.md`); `internal/auth/tokens` holds the app-level wiring — a generic `Signer` (key + signature path) with one instance per kind (`Download` today, previews next), the delivery policy (`DownloadToken`/`SignDownload`/`VerifyDownload`/`IsCoarseDownload`), and `Derive` for the not-yet-signed preview token. Full details, including the delivery rules and test gotchas, are in `internal/auth/tokens/README.md`. It is a Propagate-configured leaf like `thumb`/`dl`/`ttl`, so it imports neither `config` nor `get`: `Config.Propagate` sets the signer key/path plus `tokens.PublicMode`/`CoarseDownload`, and config owns `Config.TokenSigningKey` (the shared `config/keys/signing.key` secret) and `DownloadTokenMaxAge` (the `download-token-maxage` option, effective value in `ttl.DownloadToken`). Download tokens are **stateless** — no per-session/user storage. Request-side resolution in `internal/api/auth_tokens.go`: `AuthDownload(c) (sess, valid)` is the merged gate the endpoints use (session-or-coarse authorization + the resolved session in one call, auditing a denial centrally like `AuthAny`), `InvalidDownloadToken` is a thin wrapper, and `DownloadSession` resolves a signed `?t=` token to its session — accepting, before the token, a **Portal cluster JWT in a request header** (`authAnyJWT` requiring `acl.AccessAll` on files, so only a trusted full-access principal qualifies; a transient JWT session can't back a `?t=` token, and only JWTs — not arbitrary bearer/Basic-auth headers — take this path, which otherwise falls through to `?t=`). Scoped consumers: `DownloadAlbum` (`internal/api/download_album.go`), `GetDownload` (`internal/api/download.go`), `GetPhotoDownload` (`internal/api/photos.go`), `ZipDownload` (`internal/api/zip.go`).
 
 Media Processing
 - Thumbnails: `internal/thumb/*` and helpers in `internal/photoprism/mediafile_thumbs.go`.
 - Metadata: `internal/meta/*`.
 - FFmpeg integration: `internal/ffmpeg/*`.
+- 360° originals (Insta360 `.insp`/`.insv`, fisheye DNG): recognized in `pkg/fs/file_types.go` and `pkg/media/insta360.go`, with the projection vocabulary in `pkg/media/projection`. Detection and capture grouping live in `internal/photoprism/mediafile_insta360.go` / `mediafile_projection.go`; `internal/ffmpeg/v360.go` builds the dewarp commands that `convert_image*.go` and `convert_video_avc.go` run, always writing a derivative and never touching the original. Only the equirectangular derivative is reported to the viewer (`sphereProjection` in `internal/entity/search/photos_results.go`); `fisheye:` finds the originals behind it.
 - HEIF tooling: distribution binaries live under `scripts/dist/install-libheif.sh`; regenerate archives with `make build-libheif-*` (wraps `scripts/dist/build-libheif.sh` for each supported distro/arch) before publishing to `dl.photoprism.app/dist/libheif/`.
 - Folder album consistency:
   - `internal/entity/folder.go` keeps `FindFolder(...)` unscoped for create/index conflict handling, so a soft-deleted row cannot cause repeated insert/fail/not-found loops.
@@ -188,17 +192,18 @@ Testing
 Security & Hot Spots (Where to Look)
 - Zip extraction (path traversal prevention): `pkg/fs/zip.go`
   - Uses `safeJoin` to reject absolute/volume paths and `..` traversal; enforces per-file and total size limits.
-  - Tests: `pkg/fs/zip_extra_test.go` cover abs/volume/.. cases and limits.
+  - Tests: `pkg/fs/zip_test.go` covers abs/volume/.. cases and limits.
 - Force-aware Copy/Move and truncation-safe writes:
   - App helpers: `internal/photoprism/mediafile.go` (`MediaFile.Copy/Move` with `force`).
-  - Utils: `pkg/fs/copy.go`, `pkg/fs/move.go` (use `O_TRUNC` to avoid trailing bytes).
+  - Utils: `pkg/fs/copy_move.go` — `fs.Copy` / `fs.Move` (use `O_TRUNC` to avoid trailing bytes).
 - FFmpeg command builders and encoders:
-  - Core: `internal/ffmpeg/transcode_cmd.go`, `internal/ffmpeg/remux.go`.
+  - Core: `internal/ffmpeg/transcode_cmd.go`, `internal/ffmpeg/remux.go`, `internal/ffmpeg/v360.go`.
   - Encoders (string builders only): `internal/ffmpeg/{apple,intel,nvidia,vaapi,v4l}/avc.go`.
   - Tests guard HW runs with `PHOTOPRISM_FFMPEG_ENCODER`; otherwise assert command strings and negative paths.
 - libvips thumbnails:
-  - Pipeline: `internal/thumb/vips.go` (VipsInit, VipsRotate, export params).
-  - Sizes & names: `internal/thumb/sizes.go`, `internal/thumb/names.go`, `internal/thumb/filter.go`; face/marker crop helpers live in `internal/thumb/crop` (e.g., `ParseThumb`, `IsCroppedThumb`).
+  - Pipeline: `internal/thumb/vips.go` (`Vips` render entry, export params); init `internal/thumb/vips_init.go` (`VipsInit`); rotation `internal/thumb/vips_rotate.go` (`VipsRotate`); format conversion `internal/thumb/vips_convert.go` (`vipsConvert`, HEIC/AVIF via libheif).
+  - Sizes & names: `internal/thumb/sizes.go` (`MaxSize`, `InvalidSize`), `internal/thumb/size.go` (`Uncached`, `ExceedsLimit`, `Clamp`, `Limit`), `internal/thumb/fit.go` (`FitSizes`, `FitBounds`), `internal/thumb/names.go`, `internal/thumb/filter.go`; face/marker crop helpers live in `internal/thumb/crop` (e.g., `ParseThumb`, `IsCroppedThumb`).
+  - Endpoints: `internal/api/thumbnails.go` (`GetThumb`), `internal/api/albums_cover.go` (`AlbumCover`, shared `coverSize`), `internal/api/labels_cover.go` (`LabelCover`), `internal/api/folders_cover.go` (`FolderCover`); response and cover caching in `internal/api/cache.go`.
 
 - Safe HTTP downloader:
   - Shared utility: `pkg/http/safe` (`Download`, `Options`).
@@ -242,8 +247,8 @@ Cluster Registry & Provisioner Cheatsheet
   - Registration returns `Secrets.ClientSecret`; the CLI persists it under config `NodeClientSecret`.
   - Admin responses may include `AdvertiseUrl` and `Database`; non-admin responses are redacted by default.
 - Cluster CLI highlights:
-  - `photoprism cluster register` supports `--site-url` and `--advertise-url`. Both values are always forwarded to the Portal; `SiteUrl` no longer depends on being different from the advertised URL.
-  - Automatic MariaDB credential rotation logic now lives in `config.ShouldAutoRotateDatabase()` and is shared by both the CLI and node bootstrap.
+  - `photoprism cluster register` supports `--site-url` and `--advertise-url`. Both values are always forwarded to the Portal regardless of whether they differ.
+  - Automatic MariaDB credential rotation logic lives in `config.ShouldAutoRotateDatabase()` and is shared by both the CLI and node bootstrap.
 
 Frequently Touched Files (by topic)
 - CLI wiring: `cmd/photoprism/photoprism.go`, `internal/commands/commands.go`
@@ -278,7 +283,7 @@ Downloads (CLI) & yt-dlp helpers
   - Avoid importer dedup: vary file bytes (e.g., `YTDLP_DUMMY_CONTENT`) or dest.
 
 Useful Make Targets (selection)
-- `make help` — list targets
+- `make help` — overview of the most common targets (`make list` shows all)
 - `make dep` — install Go/JS deps in container
 - `make build-go` — build backend
 - `make test-go` — backend tests (SQLite)

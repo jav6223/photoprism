@@ -4,9 +4,12 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/fs"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/entity/search"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/media"
 )
@@ -49,6 +52,19 @@ func DownloadSelection(mediaRaw, mediaSidecar, originals bool) FileSelection {
 	}
 }
 
+// AlbumDownloadSelection selects an album's files for a zip download. It keeps archived and hidden
+// pictures out of the archive (they are not part of the visible album) and defers private-picture
+// visibility to the session scope applied by SelectedFilesForSession; when allowPrivate is false
+// (an unidentified session, e.g. the instance-default token) private pictures are excluded outright.
+func AlbumDownloadSelection(mediaRaw, mediaSidecar, originals, allowPrivate bool) FileSelection {
+	sel := DownloadSelection(mediaRaw, mediaSidecar, originals)
+	sel.Archived = false
+	sel.Hidden = false
+	sel.Private = allowPrivate
+
+	return sel
+}
+
 // ShareSelection selects files to share, for example for upload via WebDAV.
 func ShareSelection(originals bool) FileSelection {
 	var omitMedia []string
@@ -85,22 +101,34 @@ func ShareSelection(originals bool) FileSelection {
 
 // SelectedFiles finds files based on the given selection form, e.g. for downloading or sharing.
 func SelectedFiles(frm form.Selection, o FileSelection) (results entity.Files, err error) {
+	return selectedFiles(frm, o, nil)
+}
+
+// SelectedFilesForSession works like SelectedFiles but limits the result to the session's shared
+// scope. Full library and admin sessions are not limited, so this adds no overhead for them.
+func SelectedFilesForSession(frm form.Selection, o FileSelection, sess *entity.Session) (results entity.Files, err error) {
+	return selectedFiles(frm, o, sess)
+}
+
+// selectedFiles finds files based on the given selection form, optionally limited to the content
+// the session may access when sess is not nil.
+func selectedFiles(frm form.Selection, o FileSelection, sess *entity.Session) (results entity.Files, err error) {
 	if frm.Empty() {
 		return results, errors.New("no items selected")
 	}
 
 	// Resolve photos in smart albums.
 	if photoIds, err := AlbumsPhotoUIDs(frm.Albums, false, o.Private); err != nil {
-		log.Warnf("query: %s", err.Error())
+		log.Warnf("query: failed to resolve smart album members for selection (%s)", clean.Error(err))
 	} else if len(photoIds) > 0 {
 		frm.Photos = append(frm.Photos, photoIds...)
 	}
 
 	var concat string
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		concat = "CONCAT(a.path, '/%')"
-	case SQLite3:
+	case dsn.DriverSQLite3:
 		concat = "a.path || '/%'"
 	default:
 		return results, fmt.Errorf("unknown sql dialect: %s", DbDialect())
@@ -175,6 +203,12 @@ func SelectedFiles(frm form.Selection, o FileSelection) (results entity.Files, e
 	// Exclude archived photos?
 	if !o.Archived {
 		s = s.Where("photos.deleted_at IS NULL")
+	}
+
+	// Limit the selection to the session's shared scope (no-op for full-access sessions). The selected
+	// photo UIDs are passed so pictures shared only through a filter-based smart album stay downloadable.
+	if sess != nil {
+		s = search.ScopeVisibleSelection(s, sess, frm.Photos)
 	}
 
 	// Find and return.

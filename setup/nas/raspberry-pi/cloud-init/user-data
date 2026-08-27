@@ -242,10 +242,10 @@ write_files:
             - "traefik.docker.network=photoprism"
           environment:
             PHOTOPRISM_ADMIN_PASSWORD: "photoprismpi"
-            PHOTOPRISM_AUTH_MODE: "passwd"
+            PHOTOPRISM_AUTH_MODE: "password"
             PHOTOPRISM_SITE_URL: "https://photoprism-pi.local/"
             PHOTOPRISM_SITE_CAPTION: "AI-Powered Photos App"
-            PHOTOPRISM_HTTP_COMPRESSION: "gzip"
+            PHOTOPRISM_HTTP_COMPRESSION: "zstd,gzip"
             PHOTOPRISM_WORKERS: 3
             PHOTOPRISM_LOG_LEVEL: "info"
             PHOTOPRISM_TRACE: "false"
@@ -266,6 +266,7 @@ write_files:
             PHOTOPRISM_AUTO_IMPORT: -1                     # delay before automatically importing files in SECONDS when uploading via WebDAV (-1 to disable)
             PHOTOPRISM_DETECT_NSFW: "false"                # automatically flags photos as private that MAY be offensive (requires TensorFlow)
             PHOTOPRISM_UPLOAD_NSFW: "true"                 # allow uploads that MAY be offensive
+            PHOTOPRISM_XMP_FACES: "true"                   # imports face regions and names from XMP metadata as people markers
             PHOTOPRISM_UPLOAD_ALLOW: ""                    # restricts uploads to these file types (comma-separated list of EXTENSIONS; leave blank to allow all)
             PHOTOPRISM_UPLOAD_ARCHIVES: "true"             # allows upload of zip archives (will be extracted before import)
             PHOTOPRISM_UPLOAD_LIMIT: 5000                  # maximum size of uploaded files and uncompressed archive contents in MB
@@ -291,7 +292,7 @@ write_files:
 
         mariadb:
           restart: always
-          image: mariadb:11
+          image: mariadb:12.3
           security_opt:
             - seccomp=unconfined
             - apparmor=unconfined
@@ -308,7 +309,7 @@ write_files:
 
         traefik:
           restart: always
-          image: traefik:v3.6
+          image: traefik:v3.7
           ports:
             - "80:80"
             - "443:443"
@@ -325,6 +326,26 @@ write_files:
             - "--entrypoints.websecure.address=:443"
             - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
             - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+            - "--entrypoints.web.http.encodedcharacters.allowencodedslash=true"
+            - "--entrypoints.web.http.encodedcharacters.allowencodedpercent=true"
+            - "--entrypoints.web.http.encodedcharacters.allowencodedhash=true"
+            - "--entrypoints.web.http.encodedcharacters.allowencodedquestionmark=true"
+            - "--entrypoints.web.http.encodedcharacters.allowencodedsemicolon=true"
+            - "--entrypoints.web.http.encodedcharacters.allowencodedbackslash=true"
+            - "--entrypoints.web.http.encodedcharacters.allowencodednullcharacter=true"
+            - "--entrypoints.websecure.http.encodedcharacters.allowencodedslash=true"
+            - "--entrypoints.websecure.http.encodedcharacters.allowencodedpercent=true"
+            - "--entrypoints.websecure.http.encodedcharacters.allowencodedhash=true"
+            - "--entrypoints.websecure.http.encodedcharacters.allowencodedquestionmark=true"
+            - "--entrypoints.websecure.http.encodedcharacters.allowencodedsemicolon=true"
+            - "--entrypoints.websecure.http.encodedcharacters.allowencodedbackslash=true"
+            - "--entrypoints.websecure.http.encodedcharacters.allowencodednullcharacter=true"
+            - "--entrypoints.web.transport.respondingtimeouts.readtimeout=3h"
+            - "--entrypoints.web.transport.respondingtimeouts.writetimeout=0s"
+            - "--entrypoints.web.transport.respondingtimeouts.idletimeout=3m"
+            - "--entrypoints.websecure.transport.respondingtimeouts.readtimeout=3h"
+            - "--entrypoints.websecure.transport.respondingtimeouts.writetimeout=0s"
+            - "--entrypoints.websecure.transport.respondingtimeouts.idletimeout=3m"
             - "--providers.docker.network=photoprism"
             - "--providers.docker.defaultRule=Host(`{{ normalize .Name }}.local`)"
             - "--log.level=DEBUG"

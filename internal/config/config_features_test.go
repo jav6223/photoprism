@@ -77,6 +77,19 @@ func TestConfig_DisableMCP(t *testing.T) {
 	assert.False(t, c.DisableMCP())
 }
 
+func TestConfig_DisableAppPasswords(t *testing.T) {
+	c := NewConfig(CliTestContext())
+
+	// Backed by the AppPasswords feature flag, which defaults to enabled.
+	assert.False(t, c.DisableAppPasswords())
+
+	c.Settings().Features.AppPasswords = false
+	assert.True(t, c.DisableAppPasswords())
+
+	c.Settings().Features.AppPasswords = true
+	assert.False(t, c.DisableAppPasswords())
+}
+
 func TestConfig_DisableExifTool(t *testing.T) {
 	c := NewConfig(CliTestContext())
 	assert.False(t, c.DisableExifTool())
@@ -103,6 +116,19 @@ func TestConfig_DisableFaces(t *testing.T) {
 	assert.True(t, c.DisableFaces())
 	c.options.DisableTensorFlow = false
 	assert.False(t, c.DisableFaces())
+}
+
+func TestConfig_XMPFaces(t *testing.T) {
+	t.Run("Disabled", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		assert.False(t, c.XMPFaces())
+	})
+	t.Run("Enabled", func(t *testing.T) {
+		ctx := CliTestContext()
+		assert.NoError(t, ctx.Set("xmp-faces", "true"))
+		c := NewConfig(ctx)
+		assert.True(t, c.XMPFaces())
+	})
 }
 
 func TestConfig_DisableClassification(t *testing.T) {

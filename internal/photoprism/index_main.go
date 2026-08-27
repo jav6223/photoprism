@@ -1,10 +1,12 @@
 package photoprism
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/photoprism/photoprism/internal/entity/query"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/log/status"
 )
 
 // IndexMain indexes the main file from a group of related files and returns the result.
@@ -41,8 +43,17 @@ func IndexMain(related *RelatedFiles, ind *Index, o IndexOptions) (result IndexR
 	}
 
 	// Create JPEG sidecar for media files in other formats so that thumbnails can be created.
-	if o.Convert && f.IsMedia() && !f.HasPreviewImage() {
-		if img, imgErr := ind.convert.ToImage(f, false); imgErr != nil {
+	forcePreview := forceDewarpPreview(f, o.Rescan)
+	if o.Convert && f.IsMedia() && (!f.HasPreviewImage() || forcePreview) {
+		if img, imgErr := ind.convert.ToImage(f, forcePreview); imgErr != nil {
+			// Stop the run instead of masking a full disk as a generic preview error.
+			if errors.Is(imgErr, status.ErrInsufficientStorage) {
+				ind.abortInsufficientStorage()
+				result.Err = imgErr
+				result.Status = IndexFailed
+				return result
+			}
+
 			result.Err = fmt.Errorf("index: could not create preview image for %s", clean.Log(f.RootRelName()))
 			log.Error(result.Err)
 			result.Status = IndexFailed
@@ -57,17 +68,42 @@ func IndexMain(related *RelatedFiles, ind *Index, o IndexOptions) (result IndexR
 			log.Debugf("index: created %s", clean.Log(img.BaseName()))
 
 			if imgErr = img.GenerateThumbnails(ind.thumbPath(), false); imgErr != nil {
+				// Stop the run instead of masking a full disk as a generic thumbnail error.
+				if errors.Is(imgErr, status.ErrInsufficientStorage) {
+					ind.abortInsufficientStorage()
+					result.Err = imgErr
+					result.Status = IndexFailed
+					return result
+				}
+
 				result.Err = fmt.Errorf("index: failed to generate thumbnails for %s (%s)", clean.Log(f.RootRelName()), imgErr.Error())
 				result.Status = IndexFailed
 				return result
 			}
 
+			img.SetRelatedMain(f)
 			related.Files = append(related.Files, img)
+		}
+	}
+
+	// Generate the playable equirectangular AVC while the index worker is already running in the
+	// background. This prevents the HTTP video endpoint from doing an expensive v360 conversion.
+	if o.Convert && f.DewarpableInsv() {
+		if avc, avcErr := ind.convert.ToAvc(f, ind.conf.FFmpegEncoder(), false, o.Rescan); errors.Is(avcErr, status.ErrInsufficientStorage) {
+			ind.abortInsufficientStorage()
+			result.Err = avcErr
+			result.Status = IndexFailed
+			return result
+		} else if avcErr != nil {
+			log.Warnf("index: could not create equirectangular video for %s (%s)", clean.Log(f.RootRelName()), avcErr)
+		} else if avc != nil {
+			related.Files = append(related.Files, avc)
 		}
 	}
 
 	// Index main MediaFile.
 	exists := ind.files.Exists(f.RootRelName(), f.Root())
+	f.SetRelatedMain(f)
 	result = ind.MediaFile(f, o, "", "")
 
 	// Save file error.
@@ -89,4 +125,9 @@ func IndexMain(related *RelatedFiles, ind *Index, o IndexOptions) (result IndexR
 	}
 
 	return result
+}
+
+// forceDewarpPreview reports whether forced indexing should replace a recognized 360° preview.
+func forceDewarpPreview(f *MediaFile, rescan bool) bool {
+	return rescan && f != nil && (f.DewarpableInsv() || f.IsInsp() && f.DualFisheyeLayout() || f.FisheyeDng())
 }

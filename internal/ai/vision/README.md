@@ -1,14 +1,18 @@
 ## PhotoPrism — Vision Package
 
-**Last Updated:** March 3, 2026
+**Last Updated:** August 23, 2026
 
 ### Overview
 
 `internal/ai/vision` provides the shared model registry, request builders, and parsers that power PhotoPrism’s caption, label, face, NSFW, and future generate workflows. It reads `vision.yml`, normalizes models, and dispatches calls to one of three engines:
 
 - **TensorFlow (built‑in)** — default Nasnet / NSFW / Facenet models, no remote service required. Long-running TensorFlow inference can accumulate C-allocated tensor memory until GC finalizers run, so PhotoPrism periodically triggers garbage collection to return that memory to the OS; tune with `PHOTOPRISM_TF_GC_EVERY` (default **200**, `0` disables). Lower values reduce peak RSS but increase GC overhead and can slow indexing, so keep the default unless memory pressure is severe.
-- **Ollama** — local or proxied multimodal LLMs. See [`ollama/README.md`](ollama/README.md) for tuning and schema details. The engine defaults to `${OLLAMA_BASE_URL:-http://ollama:11434}/api/generate`, trimming any trailing slash on the base URL; set `OLLAMA_BASE_URL=https://ollama.com` to opt into cloud defaults.
+- **Ollama** — local or proxied multimodal LLMs. See [`ollama/README.md`](ollama/README.md) for tuning and schema details. The engine defaults to `${OLLAMA_BASE_URL:-http://ollama:11434}/api/generate`, trimming any trailing slash on the base URL; set `OLLAMA_BASE_URL=https://ollama.com` to opt into cloud defaults. The default model is `gemma4:latest` (self-hosted) or `minimax-m3:cloud` (cloud), and reasoning is disabled by default (`Service.Think: "false"`) so thinking-capable models do not leak reasoning into results. That flag is a correctness guard rather than a performance one — a reasoning build still generates the reasoning and bills the tokens for it, so prefer a non-reasoning tag (for example `qwen3-vl:4b-instruct` over `qwen3-vl:4b`) where one exists.
 - **OpenAI** — cloud Responses API. See [`openai/README.md`](openai/README.md) for prompts, schema variants, and header requirements.
+
+Faces are the one type this registry does not own. A `face` entry in `vision.yml` schedules nothing - `FACE_RUN` decides when detection and embedding run, and a `Run` value on that entry is read and reported as ignored - and *which* model turns a crop into a vector is settled per instance by `FACE_MODEL`, which is detected once and recorded in `options.yml`. `Model.FaceModel()` returns that embedder before it looks at the `vision.yml` entry, and `nil` when embeddings are off (`FACE_MODEL=none`), when the configured weights are missing or license-refused, or while a library the model cannot read has embedding work paused. `MigrationFaceModel()` is the one caller exempt from the last gate, because `photoprism faces migrate` is what resolves that mismatch.
+
+**A custom face model in `vision.yml` is therefore deprecated.** `FACE_MODEL` is authoritative; a custom entry is still loaded while no embedding model is active, logs a deprecation warning, and has its vectors recorded under the configured model's name rather than its own. Unlike a caption or label model, every face model needs code that knows its preprocessing contract — channel order, normalization, input geometry, alignment mode — so there is nothing useful to point at a different artifact here. The registry, thresholds, and provenance columns live in [`internal/ai/face`](../face/README.md).
 
 ### Configuration
 
@@ -23,16 +27,40 @@ The `vision.yml` file is usually kept in the `storage/config` directory (overrid
 | `Model`                 | `""`                                   | Raw identifier override; precedence: `Service.Model` → `Model` → `Name`.           |
 | `Version`               | `latest` (non-OpenAI)                  | OpenAI payloads omit version.                                                      |
 | `Engine`                | inferred from service/alias            | Aliases set formats, file scheme, resolution. Explicit `Service` values still win. |
-| `Run`                   | `auto`                                 | See Run modes table below.                                                         |
+| `Run`                   | `auto`                                 | See Run modes table below; ignored for `Type: face`, which follows `FACE_RUN`.     |
 | `Default`               | `false`                                | Keep one per type for TensorFlow fallbacks.                                        |
 | `Disabled`              | `false`                                | Registered but inactive.                                                           |
 | `Resolution`            | 224 (TensorFlow) / 720 (Ollama/OpenAI) | Thumbnail edge in px; TensorFlow models default to 224 unless you override.        |
 | `System` / `Prompt`     | engine defaults                        | Override prompts per model.                                                        |
 | `Format`                | `""`                                   | Response hint (`json`, `text`, `markdown`).                                        |
+| `Normalize`             | engine default                         | Label name normalization; see the table below. Labels models only.                 |
 | `Schema` / `SchemaFile` | engine defaults / empty                | Inline vs file JSON schema (labels).                                               |
 | `TensorFlow`            | nil                                    | Local TF model info (paths, tags).                                                 |
 | `Options`               | nil                                    | Sampling/settings merged with engine defaults.                                     |
 | `Service`               | nil                                    | Remote endpoint config (see below).                                                |
+
+#### Label Name Normalization
+
+Language models return label names in whatever shape their prompt encourages, so PhotoPrism canonicalizes them before they are stored. `Normalize` selects how:
+
+| Value         | Result for `ferris wheel` | Behavior                                                                                                                                 |
+|:--------------|:--------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------|
+| *(unset)*     | engine default            | `phrase` for hosted models, `single-word` otherwise.                                                                                     |
+| `single-word` | `Ferris`                  | Collapse to the first token that resolves against the label vocabulary, or to the first token.                                           |
+| `phrase`      | `Ferris Wheel`            | Keep the phrase, matching it — and its singular form — against the vocabulary as a whole first, so `sea lions` still becomes `Sea Lion`. |
+| `false`       | `Ferris Wheel`            | Keep the name the model returned. No vocabulary name mapping at all, so `carousel` stays `Carousel` instead of becoming `Theme Park`.    |
+
+`off`, `none`, `no`, and `disabled` are accepted as aliases of `false`.
+
+Only the name depends on the mode. Confidence and topicality thresholds, categories, and priorities are applied identically in all three, including `false` — a label whose name matches a vocabulary rule still inherits that rule's threshold, so low-value names such as `background` are dropped in every mode. What does change is which rule is found: `ski-lift` inherits the stricter `ski` threshold when it collapses to `Ski`, and the global threshold when it is kept as `Ski Lift`.
+
+The defaults differ because the failure modes do. A model counts as hosted when it carries the `cloud` version tag — which holds even when a local instance proxies the request — when it is one of OpenAI's own identifiers (`gpt-*`, `o1`/`o3`/`o4`), or when its endpoint is the Ollama Cloud host. Every signal is read from the model, so a configuration that reaches both a local instance and a hosted service classifies each entry on its own. An OpenAI-compatible local server such as vLLM, llama.cpp, or LM Studio runs open-weight models under their own names and is treated as self-hosted.
+
+Hosted models only use a compound when the subject has one — across a 16-image benchmark the multi-word labels they returned were `ferris wheel`, `amusement park`, `roller coaster`, and `ski-lift`, every one of which the default mangles. Models small enough to run on an 8 GB GPU mix real compounds with filler such as `city_name` and `photo list`, which is what `single-word` keeps in check.
+
+This matters most outside English, where a compound subject is usually two words. **A name written in a non-Latin script is therefore never collapsed, whatever the mode says.** The vocabulary is English, so splitting `حمار وحشي` (zebra) into tokens has nothing to resolve against and only changes the subject to `حمار` (donkey); the same holds for `גלגל ענק` (ferris wheel) and `גלגל` (wheel). The check is on the script rather than the language, because a Latin-script name can still resolve — Spanish `noria gigante` keeps the head noun `Noria` — and a name mixing scripts keeps normal handling, so `شاطئ beach` still resolves to `Beach` through the vocabulary.
+
+Phrase mode pairs with a system prompt that does not demand single-word nouns — see `LabelSystemSimple` in the Ollama engine. It cannot repair a model that concatenates instead (`ferriswheel` stays `Ferriswheel`).
 
 #### Run Modes
 
@@ -93,28 +121,32 @@ The model `Options` adjust model parameters such as temperature, top-p, and sche
 
 Configures the endpoint URL, method, format, and authentication for [Ollama](ollama/README.md), [OpenAI](openai/README.md), and other engines that perform remote HTTP requests:
 
-| Field                              | Default                                  | Notes                                                                                                                                                                                                    |
-|:-----------------------------------|:-----------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Uri`                              | required for remote                      | Endpoint base. Empty keeps model local (TensorFlow). Ollama alias fills `${OLLAMA_BASE_URL}/api/generate`, defaulting to `http://ollama:11434`.                                                          |
-| `Method`                           | `POST`                                   | Override verb if provider needs it.                                                                                                                                                                      |
-| `Key`                              | `""`                                     | Bearer token; prefer env expansion (OpenAI: `OPENAI_API_KEY`, Ollama: `OLLAMA_API_KEY`).                                                                                                                 |
-| `Username` / `Password`            | `""`                                     | Injected as basic auth when URI lacks userinfo.                                                                                                                                                          |
-| `Model`                            | `""`                                     | Endpoint-specific override; wins over model/name.                                                                                                                                                        |
-| `Org` / `Project`                  | `""`                                     | OpenAI headers (org/proj IDs).                                                                                                                                                                           |
-| `Think`                            | `""`                                     | Optional reasoning hint passed as `think` in service requests. Supports levels like `low`, `medium`, `high`; string values `true`/`false` are normalized to JSON booleans on output. Omitted when empty. |
-| `RequestFormat` / `ResponseFormat` | set by engine alias                      | Explicit values win over alias defaults.                                                                                                                                                                 |
-| `FileScheme`                       | set by engine alias (`data` or `base64`) | Controls image transport.                                                                                                                                                                                |
-| `Disabled`                         | `false`                                  | Disable the endpoint without removing the model.                                                                                                                                                         |
+| Field                              | Default                                  | Notes                                                                                                                                                                                                                                                                                         |
+|:-----------------------------------|:-----------------------------------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Uri`                              | required for remote                      | Endpoint base. Empty keeps model local (TensorFlow). Ollama alias fills `${OLLAMA_BASE_URL}/api/generate`, defaulting to `http://ollama:11434`.                                                                                                                                               |
+| `Method`                           | `POST`                                   | Override verb if provider needs it.                                                                                                                                                                                                                                                           |
+| `Key`                              | `""`                                     | Bearer token; prefer env expansion (OpenAI: `OPENAI_API_KEY`, Ollama: `OLLAMA_API_KEY`).                                                                                                                                                                                                      |
+| `Username` / `Password`            | `""`                                     | Injected as basic auth when URI lacks userinfo.                                                                                                                                                                                                                                               |
+| `Model`                            | `""`                                     | Endpoint-specific override; wins over model/name.                                                                                                                                                                                                                                             |
+| `Org` / `Project`                  | `""`                                     | OpenAI headers (org/proj IDs).                                                                                                                                                                                                                                                                |
+| `Tier`                             | `""`                                     | OpenAI service tier sent as top-level `service_tier` in the request body (e.g. `flex` for cheaper, slower processing). OpenAI-only; supports `${ENV}` expansion. Omitted when empty (OpenAI default `auto`).                                                                                  |
+| `Think`                            | `""` (Ollama engine: `"false"`)          | Optional reasoning hint passed as `think` in service requests. The Ollama engine defaults it to `"false"` (reasoning off); re-enable with `"true"`. Supports levels like `low`, `medium`, `high`; string values `true`/`false` are normalized to JSON booleans on output. Omitted when empty. |
+| `RequestFormat` / `ResponseFormat` | set by engine alias                      | Explicit values win over alias defaults.                                                                                                                                                                                                                                                      |
+| `FileScheme`                       | set by engine alias (`data` or `base64`) | Controls image transport.                                                                                                                                                                                                                                                                     |
+| `Disabled`                         | `false`                                  | Disable the endpoint without removing the model.                                                                                                                                                                                                                                              |
 
 > **Authentication:** All credentials and identifiers support `${ENV_VAR}` expansion. `Service.Key` sets `Authorization: Bearer <token>`; `Username`/`Password` injects HTTP basic authentication into the service URI when it is not already present. When `Service.Key` is empty, PhotoPrism defaults to `OPENAI_API_KEY` (OpenAI engine) or `OLLAMA_API_KEY` (Ollama engine), also honoring their `_FILE` counterparts. Key and schema file paths must reference readable regular files (directories are ignored/rejected).
+
+> **Retries:** The shared service client retries transient `HTTP 429` responses (rate limiting, `flex`-tier capacity pressure) with bounded exponential backoff — `ServiceMaxRetries` attempts, `ServiceRetryDelay` base delay, capped at `ServiceRetryMaxDelay` — honoring a `Retry-After` header when present (also capped at `ServiceRetryMaxDelay`, so a provider asking for a longer pause is retried sooner and may fail through to the next worker pass) and keeping the total within `ServiceTimeout`. Other error statuses stay terminal, so the item is only reattempted on the next worker pass.
 
 ### Field Behavior & Precedence
 
 - Model identifier resolution order: `Service.Model` → `Model` → `Name`. `Model.GetModel()` returns `(id, name, version)` where Ollama receives `name:version` and other engines receive `name` plus a separate `Version`.
 - Env expansion runs for all `Service` credentials and `Model` overrides; empty or disabled models return empty identifiers.
 - Options merging: engine defaults fill missing fields; explicit values always win. Temperature is capped at `MaxTemperature`.
-- Authentication: `Service.Key` sets `Authorization: Bearer <token>`; `Username`/`Password` inject HTTP basic auth into the service URI when not already present.
-- Reasoning control: `Service.Think` maps to `ApiRequest.Think` and is serialized only when non-empty (`omitempty`). During JSON encoding, `"true"` / `"false"` are converted to boolean `true` / `false`; other non-empty values are sent as strings.
+- Authentication: `Service.Key` sets `Authorization: Bearer <token>`; `Username`/`Password` inject HTTP basic auth into the service URI when not already present. `Username`, `Password`, and `Key` are never serialized to JSON, and `photoprism vision ls` prints the endpoint with the password redacted, so a shared terminal transcript or report does not carry it.
+- Reasoning control: `Service.Think` maps to `ApiRequest.Think` and is serialized only when non-empty (`omitempty`). The Ollama engine defaults it to `"false"` via its engine alias (applied when `Service.Think` is empty), so reasoning is off out of the box; other engines leave it empty. During JSON encoding, `"true"` / `"false"` are converted to boolean `true` / `false`; other non-empty values are sent as strings.
+- Label name normalization: `Normalize` resolves as explicit value → `phrase` when `Model.IsCloud()` → `EngineInfo.DefaultNormalize` → `single-word`, at read time rather than at load, so a changed engine default reaches configurations that never set the field. It is applied to the response and never sent to the service. An unrecognized value is reported once when `vision.yml` is loaded and then treated as unset.
 
 ### Minimal Examples
 
@@ -132,7 +164,6 @@ Models:
 
   - Type: face
     Default: true
-    Run: auto
 ```
 
 #### Ollama Labels
@@ -140,9 +171,24 @@ Models:
 ```yaml
 Models:
   - Type: labels
-    Model: gemma3:latest
+    Model: gemma4:latest
     Engine: ollama
     Run: newly-indexed
+    Service:
+      Uri: ${OLLAMA_BASE_URL}/api/generate
+```
+
+To keep compound names such as `ferris wheel` instead of collapsing them, relax the system prompt and switch the normalization together — one without the other has no effect:
+
+```yaml
+Models:
+  - Type: labels
+    Model: gemma4:latest
+    Engine: ollama
+    Run: newly-indexed
+    Normalize: phrase
+    System: |
+      You are a PhotoPrism vision model. Output concise JSON that matches the schema.
     Service:
       Uri: ${OLLAMA_BASE_URL}/api/generate
 ```
@@ -201,6 +247,14 @@ Models:
 - **Ollama**: private, GPU/CPU-hosted multimodal LLMs; best for richer captions/labels without cloud traffic.
 - **OpenAI**: highest quality reasoning and multimodal support; requires API key and network access.
 
+### NSFW Detection
+
+NSFW is wired through the same model registry as labels, captions, and faces — `Type: nsfw` resolves to the built-in TensorFlow classifier by default, and can be overridden in `vision.yml` to point at an Ollama or OpenAI endpoint.
+
+There is also a fast-path: when `Type: labels` is served by an LLM, PhotoPrism can ask the labels call to include `nsfw` + `nsfw_confidence` in the same response. This is gated by the package-level global `DetectNSFWLabels`, set from `config.go` as `DetectNSFW() && Experimental()` — both `PHOTOPRISM_DETECT_NSFW=true` **and** `PHOTOPRISM_EXPERIMENTAL=true` are required. When either flag is off, the labels prompt stays on `LabelPromptDefault` (no NSFW fields), and `labels.IsNSFW()` cannot trigger.
+
+The runtime guards in `internal/photoprism/index_mediafile.go` and `internal/workers/vision.go` additionally short-circuit any NSFW promotion on `conf.DetectNSFW()`. The dedicated `Type: nsfw` model is filtered out of scheduled runs by `VisionModelShouldRun` whenever `DetectNSFW()` is false. See [`internal/ai/nsfw/README.md`](../nsfw/README.md) for the full call-graph and the user-facing matrix at [docs.photoprism.app/user-guide/ai/nsfw/](https://docs.photoprism.app/user-guide/ai/nsfw/).
+
 ### Model Unload on Idle
 
 PhotoPrism currently keeps TensorFlow models resident for the lifetime of the process to avoid repeated load costs. A future “model unload on idle” mode would track last-use timestamps and close the TensorFlow session/graph after a configurable idle period, releasing the model’s memory footprint back to the OS. The trade-off is higher latency and CPU overhead when a model is used again, plus extra I/O to reload weights. This may be attractive for low-frequency or memory-constrained deployments but would slow continuous indexing jobs, so it is not enabled today.
@@ -210,7 +264,7 @@ PhotoPrism currently keeps TensorFlow models resident for the lifetime of the pr
 - If face model initialization fails with `Read less bytes than requested` (often followed by `invalid face model configuration` in `GenerateFaceEmbeddings` tests), reinstall the local FaceNet assets:
   - `rm -f /tmp/photoprism/facenet.zip`
   - `rm -rf assets/models/facenet`
-  - `make dep-tensorflow` (or `scripts/download-facenet.sh`)
+  - `make dep-models` (or `scripts/dist/download-models.sh facenet`)
   - Re-run: `go test ./internal/ai/face -run TestNet -count=1` and `go test ./internal/ai/vision -run TestGenerateFaceEmbeddings -count=1`
 
 ### Related Docs

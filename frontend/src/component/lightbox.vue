@@ -17,10 +17,12 @@
     @keydown.space.exact="onKeyDown"
     @keydown.left.exact="onKeyDown"
     @keydown.right.exact="onKeyDown"
-    @keydown.esc.exact.stop="close"
+    @keydown.esc.exact.stop="onEscapeKey"
+    @keydown.enter.exact="onEnterKey"
     @keydown.tab="onTabKey"
     @click.capture="captureDialogClick"
     @pointerdown.capture="captureDialogPointerDown"
+    @wheel.capture="captureDialogWheel"
   >
     <div class="p-lightbox__underlay no-transition"></div>
     <div ref="container" class="p-lightbox__container no-transition">
@@ -29,10 +31,13 @@
         tabindex="-1"
         class="p-lightbox__content no-transition"
         :class="{
-          'sidebar-visible': info,
+          'hide-caption': hideCaption,
+          'sidebar-visible': sidebarVisible,
+          'face-marker-mode': faceMarkers.active,
           'slideshow-active': slideshow.active,
           'is-fullscreen': isFullscreen(),
           'is-zoomable': isZoomable,
+          'is-pdf': isPdfSlide,
           'is-favorite': model.Favorite,
           'is-playable': model.Playable,
           'is-video': model?.Type === 'video',
@@ -41,22 +46,57 @@
         }"
       >
         <div ref="lightbox" tabindex="-1" class="p-lightbox__pswp no-transition"></div>
-        <p-face-marker-overlay
-          v-if="shouldShowEditButton() && featPeople && markersVisible && pswp()"
+        <p-meta-face-markers
+          v-if="featPeople && faceMarkers.active && pswp()"
           ref="faceMarkerOverlay"
-          :mode="addingMarker ? 'draw' : 'display'"
-          :markers="faceMarkers"
+          :mode="faceMarkers.mode"
+          :markers="markers"
           :pswp="pswp()"
-          :busy="markersBusy"
+          :busy="faceMarkers.busy"
+          :hovered-uid="faceMarkers.hoveredMarkerUid"
           @create="onCreateFaceMarker"
-          @cancel="cancelAddingMarker"
-        ></p-face-marker-overlay>
+          @cancel="exitFaceMarkerMode"
+          @remove="onRemoveFaceMarker"
+        ></p-meta-face-markers>
+        <p-pdf-viewer
+          v-if="isPdfSlide && pdfSrc && pswp()"
+          ref="pdfViewer"
+          :key="model.Hash"
+          class="p-lightbox__pdf"
+          :src="pdfSrc"
+          :pages="model.Pages || 0"
+          :has-prev="pdfHasPrev"
+          :has-next="pdfHasNext"
+          :controls-visible="controlsShown !== 0"
+          @media-prev="pdfMediaPrev"
+          @media-next="pdfMediaNext"
+        ></p-pdf-viewer>
         <div v-show="video.controls && controlsShown !== 0" ref="controls" tabindex="-1" class="p-lightbox__controls" @click.stop.prevent>
           <div :title="video.error" class="video-control video-control--play">
             <v-icon v-if="video.error || video.errorCode > 0" icon="mdi-alert"></v-icon>
             <v-icon v-else-if="video.seeking || video.waiting" icon="mdi-loading" class="animate-loading"></v-icon>
-            <v-icon v-else-if="video.playing" icon="mdi-pause" class="clickable" @pointerdown.stop.prevent="toggleVideo"></v-icon>
-            <v-icon v-else icon="mdi-play" class="clickable" @pointerdown.stop.prevent="toggleVideo"></v-icon>
+            <button
+              v-else-if="video.playing"
+              type="button"
+              class="video-btn meta-icon-btn"
+              :title="$gettext('Pause')"
+              :aria-label="$gettext('Pause')"
+              @pointerdown.stop.prevent
+              @click.stop.prevent="toggleVideo"
+            >
+              <v-icon icon="mdi-pause"></v-icon>
+            </button>
+            <button
+              v-else
+              type="button"
+              class="video-btn meta-icon-btn"
+              :title="$gettext('Play')"
+              :aria-label="$gettext('Play')"
+              @pointerdown.stop.prevent
+              @click.stop.prevent="toggleVideo"
+            >
+              <v-icon icon="mdi-play"></v-icon>
+            </button>
           </div>
           <div class="video-control video-control--time text-body-2">
             {{ $util.formatSeconds(video.ended ? Math.ceil(video.time) : Math.floor(video.time)) }}
@@ -80,23 +120,43 @@
             {{ $util.formatRemainingSeconds(video.time, video.duration) }}
           </div>
           <div v-if="featExperimental && video.castable" class="video-control video-control--cast">
-            <v-icon v-if="video.casting" icon="mdi-cast-connected" class="clickable" @pointerdown.stop.prevent="toggleVideoRemote"></v-icon>
-            <v-icon v-else icon="mdi-cast" :disabled="video.remote === 'connecting'" class="clickable" @pointerdown.stop.prevent="toggleVideoRemote"></v-icon>
+            <button
+              v-if="video.casting"
+              type="button"
+              class="video-btn meta-icon-btn"
+              :title="$gettext('Stop Casting')"
+              :aria-label="$gettext('Stop Casting')"
+              @pointerdown.stop.prevent
+              @click.stop.prevent="toggleVideoRemote"
+            >
+              <v-icon icon="mdi-cast-connected"></v-icon>
+            </button>
+            <button
+              v-else
+              type="button"
+              class="video-btn meta-icon-btn"
+              :disabled="video.remote === 'connecting'"
+              :title="$gettext('Cast')"
+              :aria-label="$gettext('Cast')"
+              @pointerdown.stop.prevent
+              @click.stop.prevent="toggleVideoRemote"
+            >
+              <v-icon icon="mdi-cast"></v-icon>
+            </button>
           </div>
         </div>
       </div>
-      <div v-if="info" ref="sidebar" tabindex="-1" class="p-lightbox__sidebar bg-background">
-        <p-sidebar-info
-          ref="sidebarInfo"
+      <div v-if="sidebarVisible" tabindex="-1" class="p-lightbox__sidebar bg-background">
+        <p-lightbox-sidebar
+          ref="sidebar"
           :uid="model.UID"
-          @close="hideInfo"
-          @toggle-markers-visible="toggleMarkersVisible"
-          @toggle-adding-marker="toggleAddingMarker"
-          @remove-marker="onRemoveFaceMarker"
-          @eject-marker="onEjectFaceMarker"
+          @close="hideSidebar"
+          @toggle-face-marker-mode="toggleFaceMarkerMode"
+          @toggle-face-marker-edit="toggleFaceMarkerEdit"
+          @clear-subject="onClearMarkerSubject"
           @reload-markers="onReloadFaceMarkers"
-          @naming-started="pendingNameMarkerUid = null"
-        ></p-sidebar-info>
+          @naming-started="faceMarkers.setPendingNameMarkerUid('')"
+        ></p-lightbox-sidebar>
       </div>
     </div>
     <p-lightbox-menu
@@ -121,8 +181,11 @@ import Collection from "model/collection";
 import { Photo } from "model/photo";
 import { Album } from "model/album";
 import * as media from "common/media";
+import { isPdfDocument } from "common/pdf";
 import { getAppSessionStorage, getAppStorage } from "common/storage";
 import * as contexts from "options/contexts";
+import { $faceMarkers } from "common/face-markers";
+import { createSphereViewer, destroySphereViewer, findSphereVideoElement, is360Equirectangular } from "common/sphere";
 
 const VIDEO_EVENT_TYPES = [
   "loadstart",
@@ -145,17 +208,38 @@ const VIDEO_EVENT_TYPES = [
 
 const VIDEO_REMOTE_EVENT_TYPES = ["connect", "connecting", "disconnect"];
 
+// Max pointer travel (px) for a press on a 360° sphere to still count as a tap
+// rather than a pan, used to toggle the lightbox controls on touch devices.
+const SPHERE_TAP_SLOP = 10;
+
 import PLightboxMenu from "component/lightbox/menu.vue";
-import PSidebarInfo from "component/sidebar/info.vue";
+import PLightboxSidebar from "component/lightbox/sidebar.vue";
 import { Marker } from "model/marker";
 import * as src from "common/src";
 
 const appStorage = getAppStorage();
 const appSessionStorage = getAppSessionStorage();
+const viewportPadding = { top: 0, bottom: 0, left: 0, right: 0 };
+
+// shouldShowSidebar returns the persisted sidebar visibility flag.
+const shouldShowSidebar = () => {
+  return appStorage.getItem("lightbox.sidebar") === "true";
+};
+
+// shouldHideCaption returns the persisted Ctrl+H caption visibility flag;
+// a missing key resolves to visible so first-time users see the caption.
+const shouldHideCaption = () => {
+  return appStorage.getItem("lightbox.caption") === "false";
+};
+
+// Most recent Escape KeyboardEvent handled by onEscapeKey; comparing identity
+// collapses the press's duplicate dispatch (see onEscapeKey) into one unwind.
+// Module-scoped rather than instance state — PLightbox is mounted once per session.
+let _lastEscapeEvent = null;
 
 export default {
   name: "PLightbox",
-  components: [PLightboxMenu, PSidebarInfo],
+  components: [PLightboxMenu, PLightboxSidebar],
   emits: ["enter", "leave"],
   expose: ["onShortCut"],
   data() {
@@ -165,12 +249,12 @@ export default {
     return {
       debug,
       trace,
-      visible: false,
       busy: false,
       closing: false,
-      info: appStorage.getItem("lightbox.info") === "true",
+      visible: false,
+      sidebarVisible: shouldShowSidebar(),
+      hideCaption: shouldHideCaption() || shouldShowSidebar(),
       menuElement: null,
-      menuBgColor: "#252525",
       menuVisible: false,
       lightbox: null, // Current PhotoSwipe lightbox instance.
       captionPlugin: null, // Current PhotoSwipe caption plugin instance.
@@ -206,11 +290,10 @@ export default {
       contextAllowsEdit: true,
       contextAllowsSelect: true,
       featPeople: this.$config.feature("people"),
-      markersVisible: false,
-      addingMarker: false,
-      markersBusy: false,
-      faceMarkers: [],
-      pendingNameMarkerUid: null,
+      // Shared face-marker state (`common/face-markers.js`). The lightbox
+      // owns policy; the sidebar reads the same singleton. Entering any
+      // non-null mode pauses playback; exit does NOT resume.
+      faceMarkers: $faceMarkers,
       subscriptions: [], // Event subscriptions.
       // Video properties for rendering the controls.
       video: {
@@ -251,10 +334,58 @@ export default {
       },
     };
   },
+  computed: {
+    // Face-marker rectangles for the current photo, re-derived from
+    // `photo.getMarkers(true)` on every reactive read. Replaces the
+    // legacy local `faceMarkers` data array — Vue's reactivity tracks
+    // the underlying `file.Markers` array so create / eject / remove
+    // mutations propagate to the overlay without an explicit refresh.
+    markers() {
+      if (!this.photo?.UID || typeof this.photo.getMarkers !== "function") {
+        return [];
+      }
+      return this.photo.getMarkers(true);
+    },
+    // isPdfSlide reports whether the current slide is a PDF document, so the
+    // interactive viewer overlay replaces the static first-page cover.
+    isPdfSlide() {
+      return this.visible && !!this.model && isPdfDocument(this.model);
+    },
+    // pdfSrc is the inline-PDF URL for the current document slide. The slide's
+    // hash is the document's cover image; the backend resolves it to the
+    // original PDF for the same photo (see the GetFileBytes handler).
+    pdfSrc() {
+      return this.model?.Hash ? this.$util.pdfUrl(this.model.Hash) : "";
+    },
+    // pdfHasPrev / pdfHasNext gate the PDF viewer's touch media-navigation arrows,
+    // mirroring the bounds checks in pdfMediaPrev / pdfMediaNext.
+    pdfHasPrev() {
+      return this.index > 0;
+    },
+    pdfHasNext() {
+      return this.models.length > this.index + 1;
+    },
+  },
+  watch: {
+    // Routes null ↔ active transitions through enterFaceMarkerMode /
+    // exitFaceMarkerMode. display ↔ draw transitions (both truthy) are
+    // no-ops — playback is already paused and markers stay on screen.
+    "faceMarkers.mode"(now, was) {
+      if (!was && now) {
+        this.enterFaceMarkerMode();
+      } else if (was && !now) {
+        this.exitFaceMarkerMode();
+      }
+    },
+  },
   created() {
     this.subscriptions.push(this.$event.subscribe("lightbox.open", this.openLightbox.bind(this)));
     this.subscriptions.push(this.$event.subscribe("lightbox.pause", this.pauseLightbox.bind(this)));
     this.subscriptions.push(this.$event.subscribe("lightbox.close", this.onClose.bind(this)));
+    // Pick up Title/Caption edits made by other clients so the dynamic
+    // caption reflects them on the next layout pass without waiting for
+    // the slide to be re-created.
+    this.subscriptions.push(this.$event.subscribe("photos.updated", this.onPhotosUpdated.bind(this)));
   },
   beforeUnmount() {
     // Exit fullscreen mode if enabled, has no effect otherwise.
@@ -309,7 +440,8 @@ export default {
       this.closing = false;
       this.visible = true;
       this.wasFullscreen = $fullscreen.isEnabled();
-      this.info = appStorage.getItem("lightbox.info") === "true";
+      this.sidebarVisible = shouldShowSidebar();
+      this.hideCaption = shouldHideCaption() || this.sidebarVisible;
 
       // Publish init event.
       this.$event.publish("lightbox.init");
@@ -321,7 +453,7 @@ export default {
       this.resetFaceMarkers();
 
       // Hide sidebar.
-      this.info = false;
+      this.sidebarVisible = false;
 
       // Remove lightbox focus and hide lightbox.
       if (this.visible) {
@@ -377,10 +509,10 @@ export default {
 
       return this.$refs.lightbox;
     },
-    // Returns the metadata sidebar element.
-    getSidebarElement() {
+    // Returns the sidebar Vue component proxy.
+    getSidebar() {
       if (!this.$refs.sidebar) {
-        this.log("sidebar element is not visible");
+        this.log("sidebar component is not visible");
         return null;
       }
 
@@ -419,6 +551,7 @@ export default {
         tapAction: (point, ev) => this.onContentTap(ev),
         imageClickAction: (point, ev) => this.onContentClick(ev),
         bgClickAction: (point, ev) => this.onBgClick(ev),
+        padding: viewportPadding,
         paddingFn: (viewport, data) => this.getPadding(viewport, data),
         getViewportSizeFn: () => this.getViewport(),
         closeTitle: this.$gettext("Close"),
@@ -612,6 +745,29 @@ export default {
         loading: false,
       };
 
+      // Route equirectangular 360° media to the lazy-loaded sphere viewer before the video branch,
+      // since panoramic videos are also Playable and would otherwise fall through. is360Equirectangular
+      // routes on the equirectangular projection when present, and falls back to the 2:1 frame for
+      // panorama-flagged videos that carry no readable projection tag — cubemap and ultrawide clips
+      // stay flat. See common/sphere.js for the discriminator.
+      const isEquirect = is360Equirectangular(model);
+      if (isEquirect && model?.Hash) {
+        const isVideo = model?.Type === media.Video || model?.Type === media.Animated;
+        // Request the largest available size so 360° photos stay crisp when zoomed; $util.thumb
+        // clamps to the biggest size the server advertises (fit_15360 when the on-demand limit allows).
+        const src = isVideo ? this.$util.videoUrl(model.Hash, model?.Codec, model?.Mime) : this.$util.thumb(model.Thumbs, 15360, 8640).src;
+        return {
+          type: "html",
+          html: `<div class="pswp__html"></div>`,
+          model: model,
+          isSphere: true,
+          isVideo: isVideo,
+          src: src,
+          msrc: img.src,
+          loading: true,
+        };
+      }
+
       // Check if content is playable and return the data needed to render it in "contentLoad".
       if (model?.Playable && model?.Hash) {
         /*
@@ -647,14 +803,165 @@ export default {
       return img;
     },
     isContentZoomable(isContentZoomable, content) {
+      if (content.data?.isSphere) {
+        return false;
+      }
       if (content.data?.model?.Type === media.Live) {
         isContentZoomable = true;
       }
 
       return isContentZoomable;
     },
+    // slideZoomable reports whether a slide supports the flat zoom button and
+    // pinch/click-to-zoom. 360° sphere slides own their zoom/pan, documents own
+    // zoom via the PDF viewer, and videos and animations are never flatly zoomable;
+    // the result drives the `.is-zoomable` class that shows or hides the PhotoSwipe
+    // zoom button.
+    slideZoomable(data) {
+      if (data?.isSphere) {
+        return false;
+      }
+      return data?.model?.Type !== media.Video && data?.model?.Type !== media.Animated && data?.model?.Type !== media.Document;
+    },
+    // trapSphereGestures stops PhotoSwipe's swipe/zoom gesture detection from running
+    // while the user interacts with a 360° sphere. It swallows pointer + wheel events
+    // on the sphere container during the bubble phase, before they reach PhotoSwipe's
+    // listeners on the scroll wrapper above it.
+    //
+    // Touch events are deliberately NOT trapped: PhotoSwipe binds pointer events on our
+    // browser baseline (it only falls back to touch when PointerEvent is unavailable),
+    // while Photo Sphere Viewer drives panning from touchmove/touchend listeners bound on
+    // `window`. A bubble-phase stopPropagation here would keep those events from reaching
+    // PSV and break 360° panning on touch devices. UI buttons (close, prev/next, sidebar)
+    // live on the PhotoSwipe wrapper outside this container and stay clickable.
+    //
+    // Trapping the pointer events also swallows PhotoSwipe's tap detection, which is what
+    // reveals the prev/next arrows and top bar on touch devices. To restore that, a short
+    // press without a pan toggles the controls here. Only touch/pen taps do so — mouse
+    // users still get the controls via mousemove, so desktop behavior is unchanged.
+    //
+    // Pausing a running slideshow on interaction is NOT done here — the dialog's capture
+    // handlers (captureDialogPointerDown / captureDialogWheel) own that for every slide type.
+    // The tap-toggle only reads the `_slideshowPausedByPointer` flag they set, so a tap that
+    // paused the slideshow lands on the paused view with the revealed controls left intact.
+    trapSphereGestures(el) {
+      const stop = (e) => e.stopPropagation();
+      let tapX = 0;
+      let tapY = 0;
+      let tapping = false;
+      el.addEventListener(
+        "pointerdown",
+        (e) => {
+          e.stopPropagation();
+          tapping = e.pointerType !== "mouse";
+          tapX = e.clientX;
+          tapY = e.clientY;
+        },
+        { capture: false }
+      );
+      el.addEventListener(
+        "pointerup",
+        (e) => {
+          e.stopPropagation();
+          // Skip the toggle when the dialog's capture handler paused the slideshow on this
+          // pointer: pauseSlideshow() already revealed the controls, so toggling would hide them.
+          if (tapping && !this._slideshowPausedByPointer && Math.abs(e.clientX - tapX) < SPHERE_TAP_SLOP && Math.abs(e.clientY - tapY) < SPHERE_TAP_SLOP) {
+            this.toggleControls();
+          }
+          tapping = false;
+        },
+        { capture: false }
+      );
+      el.addEventListener(
+        "pointercancel",
+        (e) => {
+          e.stopPropagation();
+          tapping = false;
+        },
+        { capture: false }
+      );
+      ["pointermove", "wheel"].forEach((type) => {
+        el.addEventListener(type, stop, { capture: false });
+      });
+    },
+    // setSphereClass toggles the `pswp--sphere` marker on the PhotoSwipe root element so
+    // CSS can keep the prev/next arrows reachable on touch devices for 360° slides, where
+    // swipe is captured for panning instead of navigation. PhotoSwipe hides the arrows on
+    // touch by default, leaving such slides with no way to switch photos otherwise.
+    setSphereClass(enabled) {
+      const el = this.pswp()?.element;
+      if (el?.classList) {
+        el.classList.toggle("pswp--sphere", enabled);
+      }
+    },
     onContentLoad(ev) {
       const { content } = ev;
+      if (content.data?.isSphere) {
+        ev.preventDefault();
+
+        try {
+          const sphereEl = document.createElement("div");
+          sphereEl.setAttribute("class", "pswp__media pswp__media--sphere");
+          sphereEl.style.width = "100%";
+          sphereEl.style.height = "100%";
+          sphereEl.style.touchAction = "none";
+          this.trapSphereGestures(sphereEl);
+
+          content.element = sphereEl;
+          content.state = "loading";
+          content.data.loading = false;
+          content.onLoaded();
+
+          createSphereViewer(sphereEl, content.data.src, { isVideo: content.data.isVideo, muted: this.muted })
+            .then((viewer) => {
+              content.data.sphereViewer = viewer;
+              // For 360° videos, expose the underlying <video> element so the
+              // existing PhotoPrism lightbox video controls (play/pause/seek/cast)
+              // operate on it. Without this the slide has no HTMLMediaElement to
+              // drive — the PSV navbar is intentionally disabled.
+              if (content.data.isVideo) {
+                // The adapter creates the <video> element but never inserts it
+                // into the DOM (it's only a WebGL texture source). The shared
+                // setVideo() reaches for `video.parentElement.classList`, so we
+                // attach the element to a hidden host inside the slide before
+                // wiring it up. PSV keeps using the same reference for texture
+                // sampling either way.
+                const attempts = 30;
+                let tries = 0;
+                const bindWhenReady = () => {
+                  const videoEl = findSphereVideoElement(viewer);
+                  if (videoEl) {
+                    if (!videoEl.parentElement) {
+                      const host = document.createElement("div");
+                      host.className = "pswp__sphere-video-host";
+                      host.style.position = "absolute";
+                      host.style.width = "1px";
+                      host.style.height = "1px";
+                      host.style.overflow = "hidden";
+                      host.style.opacity = "0";
+                      host.style.pointerEvents = "none";
+                      host.appendChild(videoEl);
+                      sphereEl.appendChild(host);
+                    }
+                    content.data.sphereVideoEl = videoEl;
+                    this.bindSphereVideoControls(content, videoEl);
+                  } else if (++tries < attempts) {
+                    setTimeout(bindWhenReady, 100);
+                  }
+                };
+                bindWhenReady();
+              }
+            })
+            .catch((err) => {
+              this.log("failed to load sphere viewer", err);
+            });
+        } catch (err) {
+          this.log("failed to mount sphere", err);
+        }
+
+        return;
+      }
+
       if (content.data?.type === "html") {
         // Prevent default loading behavior.
         ev.preventDefault();
@@ -691,6 +998,11 @@ export default {
       }
     },
     onContentDestroy(ev) {
+      if (ev?.content?.data?.sphereViewer) {
+        destroySphereViewer(ev.content.data.sphereViewer);
+        ev.content.data.sphereViewer = null;
+      }
+
       if (typeof ev?.content?.data?.events === "object") {
         const data = ev.content.data;
 
@@ -1058,18 +1370,20 @@ export default {
       this.captionPlugin = new Captions(this.lightbox, {
         type: "below",
         mobileLayoutBreakpoint: 1024,
-        captionContent: (slide) => {
+        // Gate the plugin's panAreaSize adjustment on the user's
+        // Ctrl+H toggle (#5580). When disabled, the photo gets the
+        // full viewport instead of leaving room for the caption.
+        // toggleCaption() calls pswp.updateSize(true) to force a
+        // re-layout when this flips.
+        enabled: () => !this.hideCaption,
+        // Resolve slide → model here; the plugin owns the HTML format
+        // (sanitization, title/caption layout) so it can stay in sync
+        // with the sidebar's caption renderer.
+        getModel: (slide) => {
           if (!slide || !this.models || slide?.index < 0) {
-            return "";
+            return null;
           }
-
-          const model = this.models[slide.index];
-
-          if (model) {
-            return this.formatCaption(model);
-          }
-
-          return "";
+          return this.models[slide.index] || null;
         },
       });
 
@@ -1159,19 +1473,17 @@ export default {
           return;
         }
 
-        switch (data.model?.Type) {
-          case media.Video:
-          case media.Animated:
-            this.isZoomable = false;
-            break;
-          default:
-            this.isZoomable = true;
-        }
+        this.isZoomable = this.slideZoomable(data);
+        this.setSphereClass(data?.isSphere === true);
 
         let video;
 
-        // Get <video> element, if any.
-        if (content?.element && content?.element.firstElementChild instanceof HTMLMediaElement) {
+        // Get <video> element, if any. For 360° video slides the HTMLMediaElement is
+        // owned by Photo Sphere Viewer and cached on the slide data rather than being
+        // the slide element's first child.
+        if (content?.data?.sphereVideoEl instanceof HTMLMediaElement) {
+          video = content.data.sphereVideoEl;
+        } else if (content?.element && content?.element.firstElementChild instanceof HTMLMediaElement) {
           video = content.element.firstElementChild;
         } else {
           video = false;
@@ -1183,7 +1495,7 @@ export default {
         // a slideshow is active, or it's an animation or live photo.
         if (video) {
           if (data.loop || this.slideshow.active || firstPicture) {
-            this.playVideo(content.element.firstElementChild, data.loop);
+            this.playVideo(video, data.loop);
           }
         }
 
@@ -1198,8 +1510,11 @@ export default {
       this.lightbox.on("contentDeactivate", (ev) => {
         const { content } = ev;
 
-        // Stop any video currently playing on this slide.
-        if (content?.element && content?.element.firstElementChild instanceof HTMLMediaElement) {
+        // Stop any video currently playing on this slide. For 360° video slides the
+        // element is owned by Photo Sphere Viewer and cached on the slide data.
+        if (content?.data?.sphereVideoEl instanceof HTMLMediaElement) {
+          this.pauseVideo(content.data.sphereVideoEl);
+        } else if (content?.element && content?.element.firstElementChild instanceof HTMLMediaElement) {
           this.pauseVideo(content.element.firstElementChild);
         }
       });
@@ -1259,7 +1574,7 @@ export default {
             }),
         });
 
-        // Add information toggle button.
+        // Add sidebar toggle control.
         if (window.innerWidth > this.mobileBreakpoint) {
           lightbox.pswp.ui.registerElement({
             name: "sidebar-button",
@@ -1275,7 +1590,7 @@ export default {
               outlineID: "pswp__icn-info", // Add this to the <path> in the inner property.
               size: 24, // Depends on the original SVG viewBox, e.g. use 24 for viewBox="0 0 24 24".
             },
-            onClick: (ev) => this.onControlClick(ev, this.toggleInfo),
+            onClick: (ev) => this.onControlClick(ev, this.toggleSidebar),
           });
         }
 
@@ -1437,7 +1752,7 @@ export default {
           name: "archive",
           icon: "mdi-archive",
           text: this.$pgettext("Verb", "Archive"),
-          shortcut: "Ctrl-A",
+          shortcut: "Ctrl-X",
           disabled: !this.model,
           visible:
             this.canArchive &&
@@ -1452,7 +1767,7 @@ export default {
           name: "restore",
           icon: "mdi-archive-arrow-up",
           text: this.$gettext("Restore"),
-          shortcut: "Ctrl-A",
+          shortcut: "Ctrl-X",
           disabled: !this.model,
           visible:
             this.canArchive &&
@@ -1474,6 +1789,28 @@ export default {
             this.onDownload();
           },
         },
+        {
+          name: "show-caption",
+          icon: "mdi-text-box-outline",
+          text: this.$gettext("Show Caption"),
+          shortcut: "Ctrl-H",
+          visible: !this.sidebarVisible && this.hideCaption,
+          click: () => {
+            this.toggleCaption();
+            this.$refs.menu?.hide();
+          },
+        },
+        {
+          name: "hide-caption",
+          icon: "mdi-text-box-remove-outline",
+          text: this.$gettext("Hide Caption"),
+          shortcut: "Ctrl-H",
+          visible: !this.sidebarVisible && !this.hideCaption,
+          click: () => {
+            this.toggleCaption();
+            this.$refs.menu?.hide();
+          },
+        },
       ];
     },
     onShowMenu() {
@@ -1491,7 +1828,9 @@ export default {
       }
 
       const ok = await this.confirmDiscardSidebar();
-      if (!ok) return;
+      if (!ok) {
+        return;
+      }
 
       this.closing = true;
 
@@ -1522,7 +1861,9 @@ export default {
     // onChange().
     wrapPswpNavGuards() {
       const pswp = this.pswp();
-      if (!pswp || pswp.__navGuardsInstalled) return;
+      if (!pswp || pswp.__navGuardsInstalled) {
+        return;
+      }
       const origPrev = pswp.prev ? pswp.prev.bind(pswp) : null;
       const origNext = pswp.next ? pswp.next.bind(pswp) : null;
       if (origPrev) {
@@ -1532,7 +1873,9 @@ export default {
             return origPrev();
           }
           const ok = await this.confirmDiscardSidebar();
-          if (!ok) return;
+          if (!ok) {
+            return;
+          }
           this._suppressNavCheck = true;
           return origPrev();
         };
@@ -1544,7 +1887,9 @@ export default {
             return origNext();
           }
           const ok = await this.confirmDiscardSidebar();
-          if (!ok) return;
+          if (!ok) {
+            return;
+          }
           this._suppressNavCheck = true;
           return origNext();
         };
@@ -1574,44 +1919,6 @@ export default {
       this.$nextTick(() => {
         this.hideDialog();
       });
-    },
-    // Returns the picture (model) caption as sanitized HTML, if any.
-    formatCaption(model) {
-      if (!model) {
-        return "";
-      }
-
-      let caption = "";
-
-      if (model.Title) {
-        caption += `<h4>${this.$util.encodeHTML(model.Title.trim())}</h4>`;
-      }
-
-      /*
-        TODO: Find a good position for the date information that works for all screen sizes and image dimensions.
-              We MAY postpone this and display it along with other metadata in the new sidebar.
-       */
-      /* if (model.TakenAtLocal) {
-         caption += `<div>${this.$util.formatDate(model.TakenAtLocal)}</div>`;
-      } */
-
-      if (model.Description && !model.Caption) {
-        model.Caption = model.Description;
-      }
-
-      let text = typeof model.Caption === "string" ? model.Caption.trim() : "";
-
-      if (text) {
-        if (!caption && text.split("\n").length < 2) {
-          // Render large caption if there is no title and it has only one line.
-          caption += `<h4>${this.$util.encodeHTML(text)}</h4>`;
-        } else {
-          // Render small caption otherwise.
-          caption += `<p>${this.$util.encodeHTML(text)}</p>`;
-        }
-      }
-
-      return this.$util.sanitizeHtml(caption);
     },
     // Removes any event listeners before the lightbox is fully closed.
     onClose() {
@@ -1667,8 +1974,8 @@ export default {
       // still sees the dirty old photo. On cancel, revert via pswp.goTo().
       if (this._suppressNavCheck) {
         this._suppressNavCheck = false;
-      } else if (newIndex !== oldIndex && this.info && newIndex >= 0 && oldIndex >= 0) {
-        const sidebar = this.$refs.sidebarInfo;
+      } else if (newIndex !== oldIndex && this.sidebarVisible && newIndex >= 0 && oldIndex >= 0) {
+        const sidebar = this.getSidebar();
         if (sidebar && typeof sidebar.hasPendingEdit === "function" && sidebar.hasPendingEdit()) {
           const rollbackIndex = oldIndex;
           this.$nextTick(() => {
@@ -1676,7 +1983,9 @@ export default {
               if (!ok) {
                 this._suppressNavCheck = true;
                 const p = this.pswp();
-                if (p && typeof p.goTo === "function") p.goTo(rollbackIndex);
+                if (p && typeof p.goTo === "function") {
+                  p.goTo(rollbackIndex);
+                }
               }
             });
           });
@@ -1702,7 +2011,7 @@ export default {
       }
 
       // Fetch full photo metadata for the sidebar if it is visible.
-      if (this.info) {
+      if (this.sidebarVisible) {
         this.fetchPhoto(this.model.UID);
         this.preloadNextPhoto();
       }
@@ -1715,13 +2024,52 @@ export default {
       // Ensure that content is focused.
       this.focusContent();
     },
+    // Mirrors Title/Caption mutations reported by photos.updated WS events
+    // onto the in-memory slide models so the dynamic caption (and any other
+    // model-bound UI) reflects edits made by other clients. The event carries
+    // only UIDs, so the values are refetched through the scoped REST API for
+    // the current slide and its preloaded neighbors. The lightbox stays
+    // mounted in the background after close, so skip work unless it is
+    // actually visible with a live PhotoSwipe instance.
+    onPhotosUpdated(ev, data) {
+      if (!this.visible || !this.lightbox || !this.models.length) {
+        return;
+      }
+      if (!data || !Array.isArray(data.entities)) {
+        return;
+      }
+
+      for (let idx = this.index - 1; idx <= this.index + 1; idx++) {
+        const model = this.models[idx];
+
+        if (!model || !model.UID || !data.entities.includes(model.UID)) {
+          continue;
+        }
+
+        new Photo()
+          .find(model.UID)
+          .then((values) => {
+            if (typeof values.Title === "string") {
+              model.Title = values.Title;
+            }
+            if (typeof values.Caption === "string") {
+              model.Caption = values.Caption;
+            }
+            if (idx === this.index) {
+              this.captionPlugin?.refreshCurrentCaption();
+            }
+          })
+          .catch(() => {});
+      }
+    },
     // Fetches the full Photo model for the given UID using the LRU
     // cache, delegated to the Thumb model so the photo-fetch policy
-    // lives on the slide that owns it (Thumb.loadPhoto). Restricted
-    // roles (guest, visitor, contributor) skip the extra API call
-    // and let the sidebar work with the viewer data (Thumb model).
+    // lives on the slide that owns it (Thumb.loadPhoto). All sessions
+    // preload here: the /photos/:uid endpoint reduces detail server-side
+    // for shared-only sessions, and the sidebar's per-section ACL gates
+    // decide what actually renders.
     fetchPhoto(uid) {
-      if (!uid || this.$session.isSidebarRestricted()) {
+      if (!uid) {
         this.photo = new Photo();
         return;
       }
@@ -1736,63 +2084,84 @@ export default {
         })
         .catch(() => {});
     },
-    toggleMarkersVisible() {
-      if (!this.shouldShowEditButton()) {
-        return;
+    // Pauses playback on face-marker entry. The CSS `face-marker-mode`
+    // class swaps video for the JPEG cover so marker boxes align with
+    // the detector frame. Exit does NOT resume playback.
+    enterFaceMarkerMode() {
+      this.pauseLightbox();
+
+      // The visibility swap moves layout from <video> to <img>; the overlay
+      // anchors its bounds on the image element, so schedule a recompute
+      // once the next frame paints (after CSS visibility flips).
+      const overlay = this.$refs.faceMarkerOverlay;
+      if (overlay && typeof overlay.scheduleUpdate === "function") {
+        this.$nextTick(() => overlay.scheduleUpdate());
       }
-      if (this.markersVisible) {
-        this.markersVisible = false;
-        this.addingMarker = false;
-        this.faceMarkers = [];
-        return;
-      }
-      this.markersVisible = true;
-      this.reloadFaceMarkers();
     },
-    toggleAddingMarker() {
-      if (!this.shouldShowEditButton() || this.markersBusy) {
+    // Fully exits face-marker UI. Eye-toggle / Escape / hideSidebar all
+    // route through here.
+    exitFaceMarkerMode() {
+      this.faceMarkers.exit();
+    },
+    // toggleFaceMarkerMode flips between no overlay and FaceMarkerDisplay
+    // (read-only); rendered only for non-editable users.
+    toggleFaceMarkerMode() {
+      if (!this.featPeople) {
         return;
       }
-      if (this.addingMarker) {
-        this.addingMarker = false;
+      if (this.faceMarkers.active) {
+        this.exitFaceMarkerMode();
         return;
       }
-      this.markersVisible = true;
-      this.addingMarker = true;
-      this.reloadFaceMarkers();
+      this.faceMarkers.display();
+    },
+    // toggleFaceMarkerEdit flips between no overlay and FaceMarkerEdit
+    // (drag-to-create + click-to-remove); rendered only for editable users.
+    toggleFaceMarkerEdit() {
+      if (!this.shouldShowEditButton() || this.faceMarkers.busy) {
+        return;
+      }
+      if (this.faceMarkers.active) {
+        this.exitFaceMarkerMode();
+        return;
+      }
+      this.faceMarkers.edit();
       if (this.$refs.menu) {
         this.$refs.menu.hide();
       }
     },
-    cancelAddingMarker() {
-      this.addingMarker = false;
-    },
-    reloadFaceMarkers() {
-      if (this.photo.UID && typeof this.photo.getMarkers === "function") {
-        this.faceMarkers = this.photo.getMarkers(true);
-      } else {
-        this.faceMarkers = [];
-      }
-    },
+    // Hard reset of every face-marker UI flag — called from `hideDialog`
+    // and slide navigation so a closed lightbox or a different photo
+    // never inherits stale mode, busy flag, or pending-name UID from the
+    // previous session.
     resetFaceMarkers() {
-      this.markersVisible = false;
-      this.addingMarker = false;
-      this.markersBusy = false;
-      this.faceMarkers = [];
-      this.pendingNameMarkerUid = null;
+      this.faceMarkers.reset();
     },
+    // Asks the sidebar (if mounted) whether it has unsaved edits, returning
+    // a Promise that resolves true to proceed and false to cancel. Used by
+    // every gesture that would tear the sidebar down (hideSidebar, slide nav,
+    // close) so the user is prompted before their in-flight changes disappear.
     confirmDiscardSidebar() {
-      const sidebar = this.$refs.sidebarInfo;
+      const sidebar = this.getSidebar();
       if (sidebar && typeof sidebar.confirmDiscardPending === "function") {
         return Promise.resolve(sidebar.confirmDiscardPending());
       }
       return Promise.resolve(true);
     },
+    // Handles the overlay's `create` emit when the user confirms a drawn
+    // face region. Persists the new Marker to the backend, evicts the
+    // Photo cache, and primes the sidebar to enter inline naming for
+    // the freshly-saved row; the overlay re-renders via the `markers`
+    // computed.
     onCreateFaceMarker(area) {
-      if (!this.photo.UID || !this.shouldShowEditButton() || this.markersBusy) return;
+      if (!this.photo.UID || !this.shouldShowEditButton() || this.faceMarkers.busy) {
+        return;
+      }
 
       const file = Array.isArray(this.photo.Files) ? this.photo.Files.find((f) => !!f.Primary) : null;
-      if (!file || !file.UID) return;
+      if (!file || !file.UID) {
+        return;
+      }
 
       const marker = new Marker({
         FileUID: file.UID,
@@ -1804,17 +2173,18 @@ export default {
         H: area.H,
       });
 
-      this.markersBusy = true;
+      this.faceMarkers.setBusy(true);
       marker
         .save()
         .then(() => {
-          if (!file.Markers) file.Markers = [];
+          if (!file.Markers) {
+            file.Markers = [];
+          }
           file.Markers.push(marker.getValues());
           Photo.evictCache(this.photo.UID);
-          this.reloadFaceMarkers();
           // Trigger inline naming on the fresh row in the sidebar.
           if (marker.UID) {
-            this.pendingNameMarkerUid = marker.UID;
+            this.faceMarkers.setPendingNameMarkerUid(marker.UID);
           }
           // Only clear on success — a failed save must leave the rect on
           // the photo so the user can retry confirmation or cancel.
@@ -1826,77 +2196,112 @@ export default {
           this.$notify.error(this.$gettext("Failed to save face marker"));
         })
         .finally(() => {
-          this.markersBusy = false;
+          this.faceMarkers.setBusy(false);
         });
     },
-    onEjectFaceMarker(marker) {
-      if (!this.photo.UID || !this.shouldShowEditButton() || this.markersBusy) return;
-      if (!marker || !marker.SubjUID || typeof marker.clearSubject !== "function") return;
+    // Handles the sidebar's `clear-subject` emit (⏏ button on a named
+    // marker). Clears the marker's subject assignment via the backend,
+    // syncs the file's marker entry with fresh server values, and
+    // evicts the Photo cache. The overlay re-renders via the `markers`
+    // computed, which re-reads `photo.getMarkers(true)` whenever the
+    // underlying `file.Markers` array is mutated.
+    onClearMarkerSubject(marker) {
+      if (!this.photo.UID || !this.shouldShowEditButton() || this.faceMarkers.busy) {
+        return;
+      }
+      if (!marker || !marker.SubjUID || typeof marker.clearSubject !== "function") {
+        return;
+      }
 
-      this.markersBusy = true;
+      this.faceMarkers.setBusy(true);
       marker
         .clearSubject()
         .then(() => {
           this.syncMarkerInFile(marker);
           Photo.evictCache(this.photo.UID);
-          this.reloadFaceMarkers();
         })
         .catch(() => {
           this.$notify.error(this.$gettext("Failed to remove name"));
         })
         .finally(() => {
-          this.markersBusy = false;
+          this.faceMarkers.setBusy(false);
         });
     },
-    // Replaces the raw marker entry in file.Markers with fresh values from
-    // the updated Marker instance. Without this, photo.getMarkers() keeps
-    // returning stale Name/SubjUID after setName/clearSubject, so toggling
-    // visibility re-renders the old label.
+    // Replaces the raw marker entry in file.Markers with fresh values
+    // from the updated Marker instance. Needed because setName /
+    // clearSubject mutate the Marker instance returned by the API but
+    // leave `file.Markers[idx]` (the raw object the overlay re-derives
+    // from via `photo.getMarkers(true)`) stale.
     syncMarkerInFile(marker) {
-      if (!marker || !marker.UID || !this.photo.UID || !Array.isArray(this.photo.Files)) return;
+      if (!marker || !marker.UID || !this.photo.UID || !Array.isArray(this.photo.Files)) {
+        return;
+      }
       const file = this.photo.Files.find((f) => !!f.Primary);
-      if (!file || !Array.isArray(file.Markers)) return;
+      if (!file || !Array.isArray(file.Markers)) {
+        return;
+      }
       const idx = file.Markers.findIndex((mm) => mm.UID === marker.UID);
       if (idx >= 0) {
         file.Markers[idx] = typeof marker.getValues === "function" ? marker.getValues() : { ...file.Markers[idx], ...marker };
       }
     },
+    // Handles the sidebar's `reload-markers` emit (post-name-change).
+    // Syncs the saved marker into the file array and evicts the Photo
+    // cache so future reads see the updated row; the overlay re-renders
+    // via the `markers` computed.
     onReloadFaceMarkers(marker) {
-      if (marker) this.syncMarkerInFile(marker);
-      if (this.photo.UID) Photo.evictCache(this.photo.UID);
-      this.reloadFaceMarkers();
+      if (marker) {
+        this.syncMarkerInFile(marker);
+      }
+      if (this.photo.UID) {
+        Photo.evictCache(this.photo.UID);
+      }
     },
+    // Handles the overlay's `remove` emit (✓ on the inline confirm pill
+    // that appears when the user clicks an unnamed marker in edit mode).
+    // Rejects the marker via the backend, removes its raw entry from
+    // `file.Markers` on success, and evicts the Photo cache; the
+    // overlay re-renders via the `markers` computed. Named markers
+    // never reach this handler — the overlay's hit-test skips them and
+    // the backend gate (`marker.SubjUID` truthy) is a defense in depth.
     onRemoveFaceMarker(marker) {
-      if (!this.photo.UID || !this.shouldShowEditButton() || this.markersBusy) return;
-      if (!marker || marker.SubjUID || typeof marker.reject !== "function") return;
+      if (!this.photo.UID || !this.shouldShowEditButton() || this.faceMarkers.busy) {
+        return;
+      }
+      if (!marker || marker.SubjUID || typeof marker.reject !== "function") {
+        return;
+      }
 
       const file = Array.isArray(this.photo.Files) ? this.photo.Files.find((f) => !!f.Primary) : null;
       const uid = marker.UID;
 
-      this.markersBusy = true;
+      this.faceMarkers.setBusy(true);
       marker
         .reject()
         .then(() => {
           if (file && Array.isArray(file.Markers) && uid) {
             const idx = file.Markers.findIndex((mm) => mm.UID === uid);
-            if (idx >= 0) file.Markers.splice(idx, 1);
+            if (idx >= 0) {
+              file.Markers.splice(idx, 1);
+            }
           }
           Photo.evictCache(this.photo.UID);
-          this.reloadFaceMarkers();
         })
         .catch(() => {
           this.$notify.error(this.$gettext("Failed to remove face marker"));
         })
         .finally(() => {
-          this.markersBusy = false;
+          this.faceMarkers.setBusy(false);
         });
     },
     // Preloads the next photo's full metadata when the sidebar is visible.
     // Navigation policy lives on Photo so the lightbox only decides "when"
     // to prefetch; "what to prefetch" is owned by the model. See
-    // Photo.prefetchAround in model/photo.js.
+    // Photo.prefetchAround in model/photo.js. Runs for all sessions — the
+    // /photos/:uid endpoint reduces detail server-side for shared-only
+    // sessions, so prefetch never exposes more than the viewer may see.
     preloadNextPhoto() {
-      if (!this.info || !this.models.length || this.$session.isSidebarRestricted()) {
+      if (!this.sidebarVisible || !this.models.length) {
         return;
       }
       Photo.prefetchAround(this.models, this.index, { before: 0, after: 1 });
@@ -1963,6 +2368,12 @@ export default {
 
       return false;
     },
+    // activeSlideIsSphere reports whether the slide currently shown in PhotoSwipe is a
+    // 360° sphere, used to suppress swipe-to-navigate so a horizontal drag pans the
+    // sphere instead of switching photos.
+    activeSlideIsSphere() {
+      return this.pswp()?.currSlide?.content?.data?.isSphere === true;
+    },
     // Called when the lightbox receives a pointer down or up event.
     // Move events are ignored for now.
     onLightboxPointerEvent(ev, action) {
@@ -1983,6 +2394,19 @@ export default {
           ev.preventDefault();
           this.close();
         }
+        return;
+      }
+
+      // Suppress PhotoSwipe's swipe/drag navigation while a 360° sphere slide is active so
+      // the drag pans the sphere instead of switching photos. The per-element gesture trap
+      // (trapSphereGestures) relies on bubble-phase stopPropagation and is outrun by a fast
+      // swipe whose pointer leaves the sphere container before reaching PhotoSwipe's
+      // window-level pointer listeners — seen on touch-capable Windows. Marking the dispatched
+      // pointer event as default-prevented makes PhotoSwipe's gesture handler bail out at its
+      // source, independent of DOM propagation. UI controls navigate via their own click
+      // handlers and are excluded so buttons and the prev/next arrows stay usable.
+      if (!pswpControl && this.activeSlideIsSphere()) {
+        ev.preventDefault();
         return;
       }
 
@@ -2042,7 +2466,10 @@ export default {
         ev.preventDefault();
       }
     },
-    // Capture pointer down events on the dialog component.
+    // captureDialogPointerDown pauses a running slideshow on any pointer interaction with the
+    // slide content and toggles video playback for media slides. It runs in the capture phase
+    // on the dialog, so it sees every pointerdown — including the imperatively-created 360°
+    // sphere container, whose bubble-phase gesture trap (trapSphereGestures) cannot suppress it.
     captureDialogPointerDown(ev) {
       if (!ev) {
         return;
@@ -2052,16 +2479,20 @@ export default {
         this.log(`dialog.capture.${ev.type}`, { ev, target: ev.target });
       }
 
+      // Any interaction with the slide content stops a running slideshow; controls
+      // (close / prev / next / play / ...) navigate via their own handlers and are excluded.
+      // The flag lets the sphere tap-toggle skip itself when this pointer caused the pause, so
+      // the controls pauseSlideshow() reveals stay visible instead of being toggled away again.
+      this._slideshowPausedByPointer = this.slideshow.active && !this.pswpControl(ev);
+      if (this._slideshowPausedByPointer) {
+        this.pauseSlideshow();
+      }
+
       // Handle the click and touch events on custom content.
       if (
         ev.target instanceof HTMLMediaElement ||
         (ev.target instanceof HTMLElement && (ev.target.classList.contains("pswp__image") || ev.target.classList.contains("pswp__play")))
       ) {
-        // Always stop slideshow after user interaction with the content.
-        if (this.slideshow.active) {
-          this.pauseSlideshow();
-        }
-
         // On touch devices, trigger the default event on the sides and when content is zoomed.
         if (this.hasTouch) {
           const { slide } = this.getContent();
@@ -2085,6 +2516,19 @@ export default {
         this.toggleVideo();
       }
     },
+    // captureDialogWheel pauses a running slideshow when the wheel zooms the slide content.
+    // Like the pointerdown capture it runs on the dialog, covering flat slides (PhotoSwipe's
+    // wheelToZoom) and 360° spheres alike; controls are excluded and propagation is left intact
+    // so PhotoSwipe and Photo Sphere Viewer keep handling the zoom.
+    captureDialogWheel(ev) {
+      if (!ev) {
+        return;
+      }
+
+      if (this.slideshow.active && !this.pswpControl(ev)) {
+        this.pauseSlideshow();
+      }
+    },
     // Handle user clicks on an image slide in the lightbox.
     onContentClick(ev) {
       if (!ev) {
@@ -2093,10 +2537,6 @@ export default {
 
       if (this.debug) {
         this.log(`content.${ev.type}`, { ev, target: ev.target, originalTarget: ev.originalEvent?.target });
-      }
-
-      if (this.slideshow.active) {
-        this.pauseSlideshow();
       }
 
       const pswp = this.pswp();
@@ -2182,12 +2622,68 @@ export default {
 
       result.data = typeof result.content.data === "object" ? result.content.data : {};
 
-      // Get <video> element, if any.
-      if (result.content.element && result.content.element.firstElementChild instanceof HTMLMediaElement) {
+      // Get <video> element, if any. For 360° video slides, the HTMLMediaElement
+      // is owned by Photo Sphere Viewer and cached on the slide data.
+      if (result.data.sphereVideoEl instanceof HTMLMediaElement) {
+        result.video = result.data.sphereVideoEl;
+      } else if (result.content.element && result.content.element.firstElementChild instanceof HTMLMediaElement) {
         result.video = result.content.element.firstElementChild;
       }
 
       return result;
+    },
+    // bindSphereVideoControls wires the PhotoPrism lightbox video controls
+    // (play/pause/seek/duration/cast) to the HTMLMediaElement owned by Photo
+    // Sphere Viewer. Mirrors the event wiring that createVideoElement performs
+    // for the flat video path so that the existing reactive `video` state and
+    // the <p-lightbox__controls> template work without changes.
+    bindSphereVideoControls(content, videoEl) {
+      const data = content.data;
+      const ctrl = new AbortController();
+      data.events?.abort();
+      data.events = ctrl;
+
+      VIDEO_EVENT_TYPES.forEach((type) => {
+        videoEl.addEventListener(type, this.videoEventListener, { signal: ctrl.signal });
+      });
+
+      // Only push playback state into the shared reactive `video` singleton when this
+      // slide is the active one. PhotoSwipe preloads neighbors (preload: [1, 1]) and
+      // sphere binding resolves asynchronously, so a 360° video loaded next to the
+      // current photo would otherwise flip the controls bar on for that photo. When
+      // this slide is activated later, contentActivate re-resolves the cached element
+      // (data.sphereVideoEl) and sets the playback state then.
+      if (this.pswp()?.currSlide?.content !== content) {
+        return;
+      }
+
+      this.video.controls = true;
+      this.video.error = "";
+      this.video.errorCode = 0;
+      this.video.duration = Number.isFinite(videoEl.duration) ? videoEl.duration : 0;
+      this.video.time = videoEl.currentTime || 0;
+      this.video.seekable = videoEl.seekable && videoEl.seekable.length > 0;
+      this.video.playing = !videoEl.paused;
+      this.video.paused = videoEl.paused;
+      this.video.ended = videoEl.ended;
+    },
+    // Stops playback on the specified video element, if any.
+    pauseVideo(video) {
+      if (!video || !(video instanceof HTMLMediaElement)) {
+        return;
+      }
+
+      if (!video.paused) {
+        try {
+          video.pause();
+        } catch (err) {
+          if (this.debug) {
+            this.log("video.pause", { err });
+          }
+        }
+        video.parentElement?.classList.remove("is-playing");
+        this.showControls();
+      }
     },
     // Finds and pauses an actively playing video, e.g. before closing the lightbox.
     pausePlaying() {
@@ -2266,9 +2762,22 @@ export default {
         this.log("shortcut", { ev });
       }
 
+      // Focus gate: defer to native handling when a text-editable element has
+      // focus so Ctrl+A/C/X/V/Z keep working inside inline editors.
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active?.isContentEditable) {
+        return false;
+      }
+
+      // While face-marker mode is active, only Escape / Tab / KeyI /
+      // KeyD / KeyF / KeyM stay enabled (see `isShortcutDisabledInFaceMarkerMode`).
+      if (this.faceMarkers?.active && this.isShortcutDisabledInFaceMarkerMode(ev.code)) {
+        return false;
+      }
+
       switch (ev.code) {
         case "Escape":
-          this.close();
+          this.onEscapeKey(ev);
           return true;
         case "Period":
           if (!this.contextAllowsSelect) {
@@ -2277,7 +2786,7 @@ export default {
           this.onShowMenu();
           this.toggleSelect();
           return true;
-        case "KeyA":
+        case "KeyX":
           if (this.canArchive && this.context !== contexts.Hidden && this.context !== contexts.BatchEdit) {
             if (this.model.Archived || (this.context === contexts.Archive && this.model?.Archived !== false)) {
               this.onRestore();
@@ -2301,8 +2810,11 @@ export default {
             this.toggleFullscreen();
           }
           break;
+        case "KeyH":
+          this.toggleCaption();
+          return true;
         case "KeyI":
-          this.toggleInfo();
+          this.toggleSidebar();
           return true;
         case "KeyL":
           this.onShowMenu();
@@ -2324,7 +2836,14 @@ export default {
         return;
       }
 
-      if (this.info && (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement)) {
+      if (this.sidebarVisible && (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement)) {
+        return;
+      }
+
+      // See the matching gate in onShortCut. Arrow keys would tear
+      // down the overlay (slide-nav); Space would un-pause the video
+      // and contradict the entry-only-pause contract.
+      if (this.faceMarkers?.active && this.isShortcutDisabledInFaceMarkerMode(ev.code)) {
         return;
       }
 
@@ -2372,33 +2891,93 @@ export default {
           break;
       }
     },
-    // Bridges PhotoSwipe's dispatched 'keydown' event so printable keys
-    // typed into the info sidebar (notably "z" for the Subject textarea)
-    // are not swallowed by PhotoSwipe's toggleZoom shortcut. Calling
-    // preventDefault on the dispatched event causes _onKeyDown in
-    // photoswipe.esm.js to return before its switch statement runs.
-    //
-    // Tab is handled separately at the v-dialog level via onTabKey: stopping
-    // propagation there is enough because PhotoSwipe's Tab path only calls
-    // _focusRoot() (a focus trap), which Vuetify's v-dialog and the
-    // PhotoPrism $view trap (common/view.js) already provide more generically.
+    // pdfMediaPrev / pdfMediaNext move between media items from inside the PDF
+    // viewer (which captures Left/Right itself and emits these), mirroring the
+    // arrow-key navigation used for other slides.
+    pdfMediaPrev() {
+      if (this.index > 0) {
+        this.pswp().prev();
+      }
+    },
+    pdfMediaNext() {
+      if (this.models.length > this.index + 1) {
+        this.pswp().next();
+      }
+    },
+    // Returns true when the given KeyboardEvent.code names a shortcut
+    // that should be inert while face-marker mode is active. Used by
+    // both `onShortCut` (Ctrl/⌘ + key forwarder) and `onKeyDown`
+    // (template-bound Arrow / Space / Escape). Keep the set tight —
+    // every key that's safe in either mode stays out of this set.
+    isShortcutDisabledInFaceMarkerMode(code) {
+      switch (code) {
+        case "Period":
+        case "KeyX":
+        case "KeyE":
+        case "KeyH":
+        case "KeyL":
+        case "KeyS":
+        case "ArrowLeft":
+        case "ArrowRight":
+        case "Space":
+          return true;
+        default:
+          return false;
+      }
+    },
+    // Escape priority: overlay's in-flight draft → exit face-marker
+    // mode → close lightbox. Shared by the v-dialog binding and the
+    // `$view.onShortCut` forwarder.
+    onEscapeKey(ev) {
+      // A single Escape press reaches this handler twice — once via the
+      // v-dialog `@keydown.esc` binding and once via the `$view` window
+      // forwarder (onShortCut) — and both receive the same KeyboardEvent.
+      // Dedupe on its identity so one press unwinds a single level; without
+      // this the second call exits face-marker mode (or closes the lightbox)
+      // right after the first already consumed the in-progress draft.
+      if (ev && ev === _lastEscapeEvent) {
+        return;
+      }
+      _lastEscapeEvent = ev || null;
+
+      const overlay = this.$refs.faceMarkerOverlay;
+      if (overlay && typeof overlay.handleEscape === "function" && overlay.handleEscape()) {
+        return;
+      }
+      if (this.faceMarkers.active) {
+        this.exitFaceMarkerMode();
+        return;
+      }
+      this.close();
+    },
+    // Commits a pending face-marker rectangle. Sidebar inputs stop
+    // Enter on their own handlers, so this only fires outside them.
+    onEnterKey() {
+      const overlay = this.$refs.faceMarkerOverlay;
+      if (overlay && typeof overlay.handleEnter === "function") {
+        overlay.handleEnter();
+      }
+    },
+    // Stops PhotoSwipe's "z" shortcut from swallowing printable keys
+    // typed into sidebar inputs. `preventDefault` makes `_onKeyDown`
+    // bail before its switch statement.
     onPswpKeyDown(ev) {
-      if (!ev || !this.info) return;
+      if (!ev || !this.sidebarVisible) {
+        return;
+      }
       const active = document.activeElement;
       if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || (active && active.isContentEditable)) {
         ev.preventDefault();
       }
     },
-    // Tab keypress handler on the v-dialog root. Stops propagation so
-    // PhotoSwipe's document-level _focusRoot() Tab handler doesn't fire,
-    // letting browser-default Tab navigation continue normally and keeping
-    // sidebar chips, inputs, and pencils reachable by keyboard. Suppression
-    // is gated on focus being inside the lightbox tree so an event bubbling
-    // up from somewhere unexpected (e.g. a teleported overlay) can still
-    // reach PhotoSwipe. Vuetify's v-dialog focus scope and the PhotoPrism
-    // $view focus trap re-anchor focus that escapes the modal.
+    // Suppresses PhotoSwipe's document-level `_focusRoot` Tab handler
+    // when focus is inside the lightbox tree, so browser-default Tab
+    // navigation reaches sidebar inputs/chips. Vuetify + `$view` re-anchor
+    // any focus that escapes the modal.
     onTabKey(ev) {
-      if (!ev) return;
+      if (!ev) {
+        return;
+      }
       const root = this.$refs.container || this.$refs.content;
       const active = document.activeElement;
       if (root && active && root.contains(active)) {
@@ -2485,23 +3064,35 @@ export default {
 
       return true;
     },
-    // Stops playback on the specified video element, if any.
-    pauseVideo(video) {
-      if (!video || !(video instanceof HTMLMediaElement)) {
+    // Toggles the Dynamic Caption overlay. Persisted to localStorage so
+    // the choice survives slide nav and reload. The relayout runs via
+    // `this.resize(true)` inside `$nextTick` so PhotoSwipe's `paddingFn`
+    // reads the flushed `.hide-caption` class — see H8 in best-practices.
+    // No-op when the lightbox is hidden or the sidebar is open.
+    toggleCaption() {
+      if (!this.visible || this.sidebarVisible) {
         return;
       }
 
-      if (!video.paused) {
-        try {
-          video.pause();
-        } catch (err) {
-          if (this.debug) {
-            this.log("video.pause", { err });
+      this.hideCaption = !this.hideCaption;
+      appStorage.setItem("lightbox.caption", (!this.hideCaption).toString());
+
+      // Resize and focus content element.
+      this.$nextTick(() => {
+        // If there are still issues with resizing images after
+        // hiding the caption, consider the following approach:
+        //   const viewport = this.getViewport();
+        //   slide.zoomLevels.update(viewport.x, viewport.y, slide.panAreaSize);
+        //   slide.bounds.update(slide.zoomLevels.fit);
+        this.resize(true).then(() => {
+          this.focusContent();
+          this.resize(true);
+          // Show controls if caption was hidden.
+          if (!this.hideCaption) {
+            this.showControls();
           }
-        }
-        video.parentElement?.classList.remove("is-playing");
-        this.showControls();
-      }
+        });
+      });
     },
     // Mutes/unmutes the sound for videos.
     toggleMute() {
@@ -2742,35 +3333,38 @@ export default {
         this.$event.publish("dialog.edit", { selection, album, index });
       });
     },
-    resize(force) {
-      this.$nextTick(() => {
-        if (this.visible && this.getLightboxElement() && !this.isBusy("resize")) {
-          const pswp = this.pswp();
-          if (pswp && pswp?.updateSize) {
-            pswp.updateSize(force);
-          }
+    async resize(force) {
+      await this.$nextTick();
+
+      if (this.visible && this.getLightboxElement() && !this.isBusy("resize")) {
+        const pswp = this.pswp();
+        if (pswp && pswp?.updateSize) {
+          pswp.updateSize(force);
         }
-      });
+      }
     },
-    toggleInfo() {
+    toggleSidebar() {
       if (!this.visible) {
         return;
       }
 
-      if (this.info) {
-        this.hideInfo();
+      if (this.sidebarVisible) {
+        this.hideSidebar();
       } else {
-        this.showInfo();
+        this.showSidebar();
       }
     },
     // Shows the lightbox sidebar, if hidden.
-    showInfo() {
-      if (!this.visible || this.info) {
+    showSidebar() {
+      if (!this.visible || this.sidebarVisible) {
         return;
       }
 
-      this.info = true;
-      appStorage.setItem("lightbox.info", `${this.info.toString()}`);
+      this.sidebarVisible = true;
+      // Sidebar renders the caption itself; suppress the overlay so it
+      // doesn't reserve viewport padding. hideSidebar() restores the choice.
+      this.hideCaption = true;
+      appStorage.setItem("lightbox.sidebar", `${this.sidebarVisible.toString()}`);
 
       // Fetch full photo metadata when sidebar is opened.
       this.fetchPhoto(this.model?.UID);
@@ -2782,18 +3376,32 @@ export default {
         this.focusContent();
       });
     },
-    // Hides the lightbox sidebar, if visible.
-    async hideInfo() {
-      if (!this.visible || !this.info) {
+    // Hides the lightbox sidebar, if visible. Also fully exits face-marker
+    // UI when active — the eye and pencil controls live in the sidebar,
+    // so a closed sidebar would otherwise leave the overlay mounted with
+    // no UI to disable it (see P1-10).
+    async hideSidebar() {
+      if (!this.visible || !this.sidebarVisible) {
         return;
       }
 
       const ok = await this.confirmDiscardSidebar();
-      if (!ok) return;
+      if (!ok) {
+        return;
+      }
 
-      this.info = false;
+      this.sidebarVisible = false;
+      // Restore the user's persisted Ctrl+H caption preference (#5580).
+      this.hideCaption = shouldHideCaption();
+      if (this.faceMarkers.active) {
+        this.exitFaceMarkerMode();
+      }
 
-      appStorage.setItem("lightbox.info", `${this.info.toString()}`);
+      appStorage.setItem("lightbox.sidebar", `${this.sidebarVisible.toString()}`);
+
+      // Push edits made through the sidebar into the (possibly hidden)
+      // caption element so it doesn't fade back in with stale HTML.
+      this.captionPlugin?.refreshCurrentCaption();
 
       // Resize and focus content element.
       this.$nextTick(() => {
@@ -2923,6 +3531,15 @@ export default {
       // Get viewport size without sidebar, if visible.
       const viewport = this.getViewport();
 
+      // Caption hidden (Ctrl+H or sidebar open) → reclaim its viewport
+      // space for the photo. Mirrors the getPadding() early-return below.
+      if (this.hideCaption) {
+        return {
+          width: viewport.x * window.devicePixelRatio,
+          height: viewport.y * window.devicePixelRatio,
+        };
+      }
+
       // Subtract viewport padding to get estimated slide size if it is an image or vector graphic.
       if (model && (model.Type === media.Image || model.Type === media.Raw || model.Type === media.Vector)) {
         const padding = this.getPadding(viewport, { width: model.Width, height: model.Height });
@@ -2943,8 +3560,9 @@ export default {
         left = 0,
         right = 0;
 
-      // No lightbox padding if content width or height is not specified.
-      if (!viewport || !data?.width || !data?.height) {
+      // No padding when the caption is hidden (Ctrl+H or sidebar open)
+      // or content dimensions are unknown (branching below would no-op).
+      if (this.hideCaption || !viewport || !data?.width || !data?.height) {
         return { top, bottom, left, right };
       }
 

@@ -1,6 +1,8 @@
 UI:
   Scrollbar: true
   Zoom: false
+  OpenOnHover: true
+  ReduceMotion: false
   Theme: onyx
   Language: de
   TimeZone: Local
@@ -14,7 +16,6 @@ Maps:
   Animate: 0
   Style: default
 Features:
-  Account: true
   Albums: true
   Archive: true
   Delete: true
@@ -27,6 +28,8 @@ Features:
   Folders: true
   Import: true
   Labels: true
+  Cameras: true
+  Lenses: true
   Library: true
   Logs: true
   Calendar: true
@@ -39,6 +42,8 @@ Features:
   Review: true
   Search: true
   Services: true
+  Account: true
+  AppPasswords: true
   Settings: true
   Share: true
   Upload: true

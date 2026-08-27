@@ -1,7 +1,7 @@
 ##################################################### BUILD STAGE ######################################################
 FROM photoprism/develop:buster AS build
 
-# Copyright © 2018 - 2025 PhotoPrism UG. All rights reserved.
+# Copyright © 2018 - 2026 PhotoPrism UG. All rights reserved.
 #
 # Questions? Email us at hello@photoprism.app or visit our website to learn
 # more about our team, products and services: https://www.photoprism.app/
@@ -37,6 +37,7 @@ ARG BUILD_TAG
 
 # Set environment variables, see https://docs.photoprism.app/getting-started/config-options/.
 ENV DO_NOT_TRACK=true \
+    ORT_DISABLE_TELEMETRY=1 \
     PHOTOPRISM_ARCH=$TARGETARCH \
     DOCKER_TAG=$BUILD_TAG \
     DOCKER_ENV="prod" \
@@ -118,11 +119,9 @@ RUN echo 'APT::Acquire::Retries "3";' > /etc/apt/apt.conf.d/80retries && \
       libavcodec-extra \
     && \
     /scripts/install-darktable.sh && \
-    echo 'alias ll="ls -alh"' >> /etc/skel/.bashrc && \
-    echo 'export PS1="\u@$DOCKER_TAG:\w\$ "' >> /etc/skel/.bashrc && \
+    /scripts/install-bashrc.sh && \
     echo "ALL ALL=(ALL) NOPASSWD:SETENV: /scripts/entrypoint-init.sh" >> /etc/sudoers.d/init && \
     /scripts/install-dircolors.sh && \
-    cp /etc/skel/.bashrc /root/.bashrc && \
     /scripts/create-users.sh && \
     install -d -m 0777 -o 1000 -g 1000 \
       /photoprism/originals \

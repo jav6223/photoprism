@@ -1,7 +1,7 @@
 /*
 Package face provides face recognition.
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
 	it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -14,7 +14,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	The AGPL is supplemented by our Trademark and Brand Guidelines,
 	which describe how our Brand Assets may be used:
-	<https://www.photoprism.app/trademark>
+	<https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -35,18 +35,31 @@ var log = event.Log
 
 // Face represents a face detected.
 type Face struct {
-	Rows       int        `json:"rows,omitempty"`
-	Cols       int        `json:"cols,omitempty"`
-	Score      int        `json:"score,omitempty"`
-	Area       Area       `json:"face"`
-	Eyes       Areas      `json:"eyes,omitempty"`
-	Landmarks  Areas      `json:"landmarks,omitempty"`
-	Embeddings Embeddings `json:"embeddings,omitempty"`
+	Rows        int        `json:"rows,omitempty"`
+	Cols        int        `json:"cols,omitempty"`
+	Score       int        `json:"score,omitempty"`
+	Area        Area       `json:"face"`
+	Eyes        Areas      `json:"eyes,omitempty"`
+	Landmarks   Areas      `json:"landmarks,omitempty"`
+	DetectModel EngineName `json:"detector,omitempty"`
+	EmbedModel  ModelName  `json:"model,omitempty"`
+	Embeddings  Embeddings `json:"embeddings,omitempty"`
 }
 
 // Size returns the absolute face size in pixels.
 func (f *Face) Size() int {
 	return f.Area.Scale
+}
+
+// ImageScale returns the factor that maps this face's absolute coordinates onto an image
+// of the given width, which is 1 unless it is a different rendition than the detection ran
+// on. An unknown detection width yields 1, so coordinates are left as they are.
+func (f *Face) ImageScale(width int) float64 {
+	if f == nil || f.Cols < 1 || width < 1 {
+		return 1
+	}
+
+	return float64(width) / float64(f.Cols)
 }
 
 // Dim returns the max number of rows and cols as float32 to calculate relative coordinates.

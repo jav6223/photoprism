@@ -3,6 +3,7 @@ package entity
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -323,6 +324,23 @@ func TestSession_Create(t *testing.T) {
 
 		err = s2.Create()
 		assert.Error(t, err)
+	})
+	t.Run("BadRefIDandID", func(t *testing.T) {
+		authToken := "69be27ac5ca305b394046a83f6fda18167ca3d3f2dbe7cad"
+
+		s := &Session{
+			UserName:    "freddy",
+			SessExpires: unix.Day * 3,
+			SessTimeout: unix.Now() + unix.Week,
+			RefID:       "1234567890",
+		}
+
+		s.SetAuthToken(authToken)
+
+		s.ID = "toshort"
+
+		err := s.Create()
+		assert.Empty(t, err)
 	})
 	t.Run("LongNumericAuthID", func(t *testing.T) {
 		refID := rnd.RefID("ts")
@@ -725,7 +743,6 @@ func TestSession_SetProvider(t *testing.T) {
 func TestSession_ChangePassword(t *testing.T) {
 	m := FindSessionByRefID("sessxkkcabce")
 	assert.Empty(t, m.PreviewToken)
-	assert.Empty(t, m.DownloadToken)
 
 	err := m.ChangePassword("photoprism123")
 
@@ -734,7 +751,6 @@ func TestSession_ChangePassword(t *testing.T) {
 	}
 
 	assert.NotEmpty(t, m.PreviewToken)
-	assert.NotEmpty(t, m.DownloadToken)
 
 	err2 := m.ChangePassword("Bobbob123!")
 
@@ -907,16 +923,30 @@ func TestSession_SetPreviewToken(t *testing.T) {
 	})
 }
 
-func TestSession_SetDownloadToken(t *testing.T) {
-	t.Run("Success", func(t *testing.T) {
-		m := &Session{ID: "12345678"}
-		m.SetDownloadToken("12345")
-		assert.Equal(t, "12345", m.DownloadToken)
+func TestSession_SetAuthToken(t *testing.T) {
+	t.Run("MigratesTokensWhenIdChanges", func(t *testing.T) {
+		// A session that already carries preview/download tokens must move their lookup-cache
+		// registrations to the new ID when SetAuthToken reassigns it, so the old ID does not
+		// orphan the values (#5733).
+		m := &Session{}
+		m.SetAuthToken(rnd.AuthToken())
+		oldID := m.ID
+		m.SetPreviewToken("migrate-preview")
+		assert.Equal(t, []string{oldID}, PreviewToken.Keys("migrate-preview"))
+
+		m.SetAuthToken(rnd.AppPassword())
+		assert.NotEqual(t, oldID, m.ID)
+		assert.Equal(t, []string{m.ID}, PreviewToken.Keys("migrate-preview"))
+
+		PreviewToken.Unset(m.ID)
 	})
-	t.Run("IdEmpty", func(t *testing.T) {
-		m := &Session{ID: ""}
-		m.SetDownloadToken("12345")
-		assert.Equal(t, "", m.DownloadToken)
+	t.Run("NoTokensNoOp", func(t *testing.T) {
+		m := &Session{}
+		m.SetAuthToken(rnd.AuthToken())
+		firstID := m.ID
+		m.SetAuthToken(rnd.AuthToken())
+		assert.NotEqual(t, firstID, m.ID)
+		assert.True(t, rnd.IsSessionID(m.ID))
 	})
 }
 
@@ -932,6 +962,34 @@ func TestSession_IsSuperAdmin(t *testing.T) {
 	m := &Session{}
 	assert.False(t, m.IsSuperAdmin())
 
+}
+
+func TestSession_IsApplication(t *testing.T) {
+	user := FindUserByName("alice")
+	assert.NotNil(t, user)
+
+	// Every user-bound client session is an app password, regardless of the grant
+	// type used to mint it (password for local users, session for OIDC-only users,
+	// cli for the "auth add" command). A client session without a user is a plain
+	// access token, not an app password.
+	cases := []struct {
+		name  string
+		grant authn.GrantType
+		user  *User
+		want  bool
+	}{
+		{"PasswordGrant", authn.GrantPassword, user, true},
+		{"SessionGrant", authn.GrantSession, user, true},
+		{"CliGrant", authn.GrantCLI, user, true},
+		{"ClientCredentialsNoUser", authn.GrantClientCredentials, nil, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewClientSession("test-app-"+tc.name, 3600, "*", tc.grant, tc.user)
+			assert.Equal(t, tc.want, s.IsApplication())
+		})
+	}
 }
 
 func TestSession_NotRegistered(t *testing.T) {
@@ -1085,6 +1143,27 @@ func TestSession_UpdateLastActive(t *testing.T) {
 
 		assert.GreaterOrEqual(t, unix.Now(), m.LastActive)
 	})
+	t.Run("SaveMethodSession", func(t *testing.T) {
+		expected := unix.Now() - 10
+		m := NewSession(unix.Day, unix.Hour)
+		t.Logf("Timeout: %s, Expiration: %s", m.TimeoutAt().String(), m.ExpiresAt())
+
+		assert.Equal(t, int64(0), m.LastActive)
+		m.LastActive = expected
+		m.SetMethod(authn.MethodSession)
+		m.SetAuthToken("69be27ac5ca305b394046a83f6fda18167ca3d3f2dbe70ca")
+		m.SetAuthID("MyIDString", "Testing")
+		m.AuthProvider = string(authn.ProviderClient)
+
+		if err := m.Create(); err != nil {
+			assert.Empty(t, err)
+			return
+		}
+
+		m = m.UpdateLastActive(true)
+
+		assert.Greater(t, m.LastActive, expected)
+	})
 }
 
 func TestSession_Expired(t *testing.T) {
@@ -1221,5 +1300,25 @@ func TestSession_SetUserScopeDefault(t *testing.T) {
 		sess.SetUser(user)
 
 		assert.Equal(t, "logs:*", sess.AuthScope)
+	})
+}
+
+func TestClampIdToken(t *testing.T) {
+	t.Run("Empty", func(t *testing.T) {
+		clamped, truncated := ClampIdToken("")
+		assert.Equal(t, "", clamped)
+		assert.False(t, truncated)
+	})
+	t.Run("WithinLimit", func(t *testing.T) {
+		token := strings.Repeat("a", IdTokenMaxSize)
+		clamped, truncated := ClampIdToken(token)
+		assert.Equal(t, token, clamped)
+		assert.False(t, truncated)
+	})
+	t.Run("ExceedsLimit", func(t *testing.T) {
+		token := strings.Repeat("a", IdTokenMaxSize+100)
+		clamped, truncated := ClampIdToken(token)
+		assert.True(t, truncated)
+		assert.Len(t, clamped, IdTokenMaxSize)
 	})
 }

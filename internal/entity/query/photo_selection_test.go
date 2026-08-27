@@ -9,6 +9,44 @@ import (
 	"github.com/photoprism/photoprism/internal/form"
 )
 
+func TestSelectedPhotoUIDsForSession(t *testing.T) {
+	const (
+		normalUID  = "ps6sg6be2lvl0yh7" // not private, not archived, not shared with guests
+		privateUID = "ps6sg6be2lvl0y13" // "Photo06", private
+	)
+	uids := []string{normalUID, privateUID}
+
+	t.Run("AdminSeesAll", func(t *testing.T) {
+		scoped, err := SelectedPhotoUIDsForSession(uids, aclSession("alice"))
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, uids, scoped)
+	})
+	t.Run("GuestExcludesPrivateAndUnshared", func(t *testing.T) {
+		scoped, err := SelectedPhotoUIDsForSession(uids, aclSession("guest"))
+		assert.NoError(t, err)
+		assert.NotContains(t, scoped, privateUID)
+		assert.NotContains(t, scoped, normalUID)
+	})
+	t.Run("NilSessionUnchanged", func(t *testing.T) {
+		scoped, err := SelectedPhotoUIDsForSession(uids, nil)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, uids, scoped)
+	})
+	t.Run("AdminShortCircuitSkipsQuery", func(t *testing.T) {
+		// Full-access sessions return the input verbatim without a scope query, so even an unknown
+		// UID passes through (existence is checked by the caller's own lookup).
+		in := []string{normalUID, "ps000000000unknown"}
+		scoped, err := SelectedPhotoUIDsForSession(in, aclSession("alice"))
+		assert.NoError(t, err)
+		assert.Equal(t, in, scoped)
+	})
+	t.Run("EmptyInput", func(t *testing.T) {
+		scoped, err := SelectedPhotoUIDsForSession(nil, aclSession("guest"))
+		assert.NoError(t, err)
+		assert.Empty(t, scoped)
+	})
+}
+
 func TestPhotoSelection(t *testing.T) {
 	albums := form.Selection{Albums: []string{"as6sg6bxpogaaba9", "as6sg6bitoga0004", "as6sg6bxpogaaba8", "as6sg6bxpogaaba7"}}
 
@@ -35,51 +73,54 @@ func TestPhotoSelection(t *testing.T) {
 
 		r, err := SelectedPhotos(f)
 
-		if err != nil {
-			t.Fatal(err)
+		if assert.Nil(t, err) {
+			assert.Equal(t, 2, len(r))
+			assert.IsType(t, entity.Photos{}, r)
 		}
-
-		assert.Equal(t, 2, len(r))
-		assert.IsType(t, entity.Photos{}, r)
 	})
 	t.Run("FindAlbums", func(t *testing.T) {
 		r, err := SelectedPhotos(albums)
 
-		if err != nil {
-			t.Fatal(err)
+		if assert.Nil(t, err) {
+			assert.Equal(t, 9, len(r))
+			assert.IsType(t, entity.Photos{}, r)
 		}
-
-		assert.Equal(t, 9, len(r))
-		assert.IsType(t, entity.Photos{}, r)
 	})
 	t.Run("FindMonths", func(t *testing.T) {
 		r, err := SelectedPhotos(months)
 
-		if err != nil {
-			t.Fatal(err)
+		if assert.Nil(t, err) {
+			assert.Equal(t, 0, len(r))
+			assert.IsType(t, entity.Photos{}, r)
 		}
-
-		assert.Equal(t, 0, len(r))
-		assert.IsType(t, entity.Photos{}, r)
 	})
 	t.Run("FindFolders", func(t *testing.T) {
 		r, err := SelectedPhotos(folders)
 
-		if err != nil {
-			t.Fatal(err)
+		if assert.Nil(t, err) {
+			assert.Equal(t, 2, len(r))
+			assert.IsType(t, entity.Photos{}, r)
 		}
-
-		assert.Equal(t, 2, len(r))
-		assert.IsType(t, entity.Photos{}, r)
 	})
 	t.Run("FindStates", func(t *testing.T) {
 		r, err := SelectedPhotos(states)
 
-		if err != nil {
-			t.Fatal(err)
+		if assert.Nil(t, err) {
+			assert.Equal(t, 4, len(r))
+			assert.IsType(t, entity.Photos{}, r)
+		}
+	})
+	t.Run("NotNil", func(t *testing.T) {
+		f := form.Selection{
+			Photos: []string{"pszzzzzzzzzzzzzz"},
 		}
 
-		assert.Equal(t, 4, len(r))
-		assert.IsType(t, entity.Photos{}, r)
+		r, err := SelectedPhotos(f)
+
+		if assert.Nil(t, err) {
+			assert.NotNil(t, r)
+			assert.Len(t, r, 0)
+		}
 	})
+
 }

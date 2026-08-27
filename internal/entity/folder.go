@@ -16,6 +16,9 @@ import (
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
+// FolderUID is the prefix of folder UIDs.
+const FolderUID = byte('d')
+
 var folderMutex = sync.Mutex{}
 
 type Folders []Folder
@@ -53,11 +56,11 @@ func (Folder) TableName() string {
 
 // BeforeCreate creates a random UID if needed before inserting a new row to the database.
 func (m *Folder) BeforeCreate(scope *gorm.Scope) error {
-	if rnd.IsUnique(m.FolderUID, 'd') {
+	if rnd.IsUnique(m.FolderUID, FolderUID) {
 		return nil
 	}
 
-	return scope.SetColumn("FolderUID", rnd.GenerateUID('d'))
+	return scope.SetColumn("FolderUID", rnd.GenerateUID(FolderUID))
 }
 
 // NewFolder creates a new file system directory entity.
@@ -70,6 +73,10 @@ func NewFolder(root, dir string, modTime time.Time) Folder {
 		dir = ""
 	}
 
+	// Clip to the shared path byte budget so folders.path stays byte-exact with
+	// album_path and photo_path.
+	dir = ClipPath(dir)
+
 	year := 0
 	month := 0
 
@@ -79,7 +86,7 @@ func NewFolder(root, dir string, modTime time.Time) Folder {
 	}
 
 	result := Folder{
-		FolderUID:     rnd.GenerateUID('d'),
+		FolderUID:     rnd.GenerateUID(FolderUID),
 		Root:          root,
 		Path:          dir,
 		FolderType:    MediaUnknown,
@@ -141,9 +148,9 @@ func (m *Folder) SetValuesFromPath() {
 	}
 }
 
-// Slug returns a slug based on the folder title.
+// Slug returns a collision-resistant slug derived from the folder path.
 func (m *Folder) Slug() string {
-	return txt.Slug(m.Path)
+	return txt.SlugUnique(m.Path)
 }
 
 // RootPath returns the full folder path including root.
@@ -239,6 +246,9 @@ func hasOriginalsFolderPath(rootPath string) bool {
 
 // hasOriginalsFolderAlbumSlugCollision reports whether rootPath collides with another
 // active folder album that shares the same slug but stores a different non-empty path.
+// The "different path" check runs in Go because MariaDB's utf8mb4_unicode_ci collation
+// collapses most emoji, so an SQL "album_path <> ?" would wrongly exclude an emoji
+// sibling (e.g. "ins/🪞" treated as equal to "ins/🍷") and miss the collision.
 func hasOriginalsFolderAlbumSlugCollision(rootPath string) bool {
 	albumSlugs := folderAlbumSlugCandidates(rootPath)
 
@@ -246,16 +256,22 @@ func hasOriginalsFolderAlbumSlugCollision(rootPath string) bool {
 		return false
 	}
 
-	var collisions int
+	var albums Albums
 
-	if err := Db().Model(&Album{}).
-		Where("album_type = ? AND album_slug IN (?) AND album_path <> '' AND album_path <> ?", AlbumFolder, albumSlugs, rootPath).
-		Count(&collisions).Error; err != nil {
+	if err := Db().
+		Where("album_type = ? AND album_slug IN (?) AND album_path <> ''", AlbumFolder, albumSlugs).
+		Find(&albums).Error; err != nil {
 		log.Debugf("folder: %s (check album slug collision for %s)", err, clean.LogQuote(rootPath))
 		return false
 	}
 
-	return collisions > 0
+	for i := range albums {
+		if albums[i].AlbumPath != rootPath {
+			return true
+		}
+	}
+
+	return false
 }
 
 // syncOriginalsAlbum ensures an originals folder has a matching folder album.

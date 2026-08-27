@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/auth/tokens"
 	"github.com/photoprism/photoprism/internal/config/customize"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
@@ -46,6 +47,7 @@ type ClientConfig struct {
 	SiteUrl          string              `json:"siteUrl"`
 	SiteDomain       string              `json:"siteDomain"`
 	SiteAuthor       string              `json:"siteAuthor"`
+	SiteName         string              `json:"siteName"`
 	SiteTitle        string              `json:"siteTitle"`
 	SiteCaption      string              `json:"siteCaption"`
 	SiteDescription  string              `json:"siteDescription"`
@@ -55,6 +57,7 @@ type ClientConfig struct {
 	AppName          string              `json:"appName"`
 	AppMode          string              `json:"appMode"`
 	AppIcon          string              `json:"appIcon"`
+	AppTouchIcon     string              `json:"appTouchIcon"`
 	AppColor         string              `json:"appColor"`
 	DefaultLocale    string              `json:"defaultLocale"`
 	DefaultTimezone  string              `json:"defaultTimezone"`
@@ -84,7 +87,6 @@ type ClientConfig struct {
 	Cameras          entity.Cameras      `json:"cameras"`
 	Lenses           entity.Lenses       `json:"lenses"`
 	Countries        entity.Countries    `json:"countries"`
-	People           entity.People       `json:"people"`
 	Thumbs           ThumbSizes          `json:"thumbs"`
 	Tier             int                 `json:"tier"`
 	Membership       string              `json:"membership"`
@@ -299,6 +301,7 @@ func (c *Config) ClientPublic() *ClientConfig {
 		SiteUrl:          c.SiteUrl(),
 		SiteDomain:       c.SiteDomain(),
 		SiteAuthor:       c.SiteAuthor(),
+		SiteName:         c.SiteName(),
 		SiteTitle:        c.SiteTitle(),
 		SiteCaption:      c.SiteCaption(),
 		SiteDescription:  c.SiteDescription(),
@@ -308,6 +311,7 @@ func (c *Config) ClientPublic() *ClientConfig {
 		AppName:          c.AppName(),
 		AppMode:          c.AppMode(),
 		AppIcon:          c.AppIcon(),
+		AppTouchIcon:     c.AppTouchIcon(),
 		AppColor:         c.AppColor(),
 		DefaultLocale:    c.DefaultLocale(),
 		DefaultTimezone:  c.DefaultTimezone().String(),
@@ -335,7 +339,6 @@ func (c *Config) ClientPublic() *ClientConfig {
 		Cameras:          entity.Cameras{},
 		Lenses:           entity.Lenses{},
 		Countries:        entity.Countries{},
-		People:           entity.People{},
 		Tier:             c.Hub().Tier(),
 		Membership:       c.Hub().Membership(),
 		Customer:         "",
@@ -398,6 +401,7 @@ func (c *Config) ClientShare() *ClientConfig {
 		SiteUrl:          c.SiteUrl(),
 		SiteDomain:       c.SiteDomain(),
 		SiteAuthor:       c.SiteAuthor(),
+		SiteName:         c.SiteName(),
 		SiteTitle:        c.SiteTitle(),
 		SiteCaption:      c.SiteCaption(),
 		SiteDescription:  c.SiteDescription(),
@@ -407,6 +411,7 @@ func (c *Config) ClientShare() *ClientConfig {
 		AppName:          c.AppName(),
 		AppMode:          c.AppMode(),
 		AppIcon:          c.AppIcon(),
+		AppTouchIcon:     c.AppTouchIcon(),
 		AppColor:         c.AppColor(),
 		DefaultLocale:    c.DefaultLocale(),
 		DefaultTimezone:  c.DefaultTimezone().String(),
@@ -436,7 +441,6 @@ func (c *Config) ClientShare() *ClientConfig {
 		Cameras:          entity.Cameras{},
 		Lenses:           entity.Lenses{},
 		Countries:        entity.Countries{},
-		People:           entity.People{},
 		Colors:           colors.All.List(),
 		Thumbs:           Thumbs,
 		Tier:             c.Hub().Tier(),
@@ -505,6 +509,7 @@ func (c *Config) ClientUser(withSettings bool) *ClientConfig {
 		SiteUrl:          c.SiteUrl(),
 		SiteDomain:       c.SiteDomain(),
 		SiteAuthor:       c.SiteAuthor(),
+		SiteName:         c.SiteName(),
 		SiteTitle:        c.SiteTitle(),
 		SiteCaption:      c.SiteCaption(),
 		SiteDescription:  c.SiteDescription(),
@@ -514,6 +519,7 @@ func (c *Config) ClientUser(withSettings bool) *ClientConfig {
 		AppName:          c.AppName(),
 		AppMode:          c.AppMode(),
 		AppIcon:          c.AppIcon(),
+		AppTouchIcon:     c.AppTouchIcon(),
 		AppColor:         c.AppColor(),
 		DefaultLocale:    c.DefaultLocale(),
 		DefaultTimezone:  c.DefaultTimezone().String(),
@@ -544,7 +550,6 @@ func (c *Config) ClientUser(withSettings bool) *ClientConfig {
 		Cameras:          entity.Cameras{},
 		Lenses:           entity.Lenses{},
 		Countries:        entity.Countries{},
-		People:           entity.People{},
 		Colors:           colors.All.List(),
 		Thumbs:           Thumbs,
 		Tier:             c.Hub().Tier(),
@@ -698,7 +703,6 @@ func (c *Config) ClientUser(withSettings bool) *ClientConfig {
 
 	// People are subjects with type person.
 	cfg.Count.People, _ = query.PeopleCount()
-	cfg.People, _ = query.People()
 
 	c.Db().
 		Where("id IN (SELECT photos.camera_id FROM photos WHERE photos.photo_quality > -1 OR photos.deleted_at IS NULL)").
@@ -767,12 +771,21 @@ func (c *Config) ClientSession(sess *entity.Session) (cfg *ClientConfig) {
 		cfg = c.ClientPublic()
 	}
 
-	if c.Public() {
+	switch {
+	case c.Public():
 		cfg.PreviewToken = entity.TokenPublic
 		cfg.DownloadToken = entity.TokenPublic
-	} else if sess.PreviewToken != "" || sess.DownloadToken != "" {
+	case sess.PreviewToken != "":
 		cfg.PreviewToken = sess.PreviewToken
-		cfg.DownloadToken = sess.DownloadToken
+
+		// The download token is the "?t=" value: a signed, session-bound token so header-less download
+		// endpoints can scope the response to this session.
+		cfg.DownloadToken = tokens.DownloadToken(sess.ID)
+	default:
+		// A session without its own preview token gets no download token either, as the download token
+		// is the higher-value credential: it authorizes originals, and a coarse one is also accepted for
+		// previews. Clears the base config value so a configured static token is not handed out here.
+		cfg.DownloadToken = ""
 	}
 
 	return cfg

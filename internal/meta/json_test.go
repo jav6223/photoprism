@@ -12,6 +12,29 @@ import (
 )
 
 func TestJSON(t *testing.T) {
+	t.Run("AviVideoCodec", func(t *testing.T) {
+		data, err := JSON("testdata/avi-magicyuv.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The codec is read from the AVI VideoCodec tag (no CompressorID/VideoCodecID
+		// is present) and normalized to its canonical name.
+		assert.Equal(t, video.CodecMagicYUV, data.Codec)
+		assert.Equal(t, 160, data.Width)
+		assert.Equal(t, 120, data.Height)
+	})
+	t.Run("MkvVfwWrapper", func(t *testing.T) {
+		data, err := JSON("testdata/mkv-vfw.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The Matroska VFW wrapper codec ID normalizes to the canonical VFW name.
+		assert.Equal(t, video.CodecVFW, data.Codec)
+	})
 	t.Run("MovJson", func(t *testing.T) {
 		data, err := JSON("testdata/mov.json", "")
 
@@ -576,6 +599,46 @@ func TestJSON(t *testing.T) {
 		assert.Equal(t, 1, data.FocalLength)
 		assert.Equal(t, 1, data.Orientation)
 		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+	})
+	t.Run("PanoramaUsePanoramaViewer", func(t *testing.T) {
+		data, err := JSON("testdata/panorama_usepanoramaviewer.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+		assert.Contains(t, data.Keywords.String(), "panorama")
+	})
+	t.Run("PanoramaIsPhotosphere", func(t *testing.T) {
+		data, err := JSON("testdata/panorama_isphotosphere.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+		assert.Contains(t, data.Keywords.String(), "panorama")
+	})
+	t.Run("PanoramaCubemap", func(t *testing.T) {
+		data, err := JSON("testdata/panorama_cubemap.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.NotEqual(t, projection.Equirectangular.String(), data.Projection)
+		assert.NotContains(t, data.Keywords.String(), "panorama")
+	})
+	t.Run("PanoramaVideoMp4", func(t *testing.T) {
+		data, err := JSON("testdata/panorama360_video.json", "panorama360_video.mp4")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+		assert.Contains(t, data.Keywords.String(), "panorama")
 	})
 	t.Run("PNum7250006Json", func(t *testing.T) {
 		data, err := JSON("testdata/P7250006.json", "P7250006.MOV")
@@ -1335,5 +1398,34 @@ func TestJSON(t *testing.T) {
 		assert.Equal(t, "GCMC", data.CameraMake)
 		assert.Equal(t, "RODFS50", data.CameraModel)
 		assert.Equal(t, "", data.LensModel)
+	})
+}
+
+func TestData_Exiftool_Software(t *testing.T) {
+	// exiftoolSoftware parses a minimal ExifTool result and returns the mapped values.
+	exiftoolSoftware := func(t *testing.T, tags string) Data {
+		t.Helper()
+		var data Data
+		if err := data.Exiftool([]byte(`[{"SourceFile":"test.jpg",`+tags+`}]`), ""); err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	t.Run("CreatorIsNotSoftware", func(t *testing.T) {
+		// dc:creator names the author of a picture, not the software that wrote it,
+		// so it must not end up in Software and block a real value.
+		data := exiftoolSoftware(t, `"Creator":"Jane Doe"`)
+		assert.Equal(t, "", data.Software)
+		assert.Equal(t, "Jane Doe", data.Artist)
+	})
+	t.Run("CreatorToolWinsOverCreator", func(t *testing.T) {
+		data := exiftoolSoftware(t, `"Creator":"Jane Doe","CreatorTool":"Adobe Lightroom 14.2"`)
+		assert.Equal(t, "Adobe Lightroom 14.2", data.Software)
+		assert.Equal(t, "Jane Doe", data.Artist)
+	})
+	t.Run("EmbeddedSoftwareWins", func(t *testing.T) {
+		data := exiftoolSoftware(t, `"Software":"Adobe Photoshop 24.0","CreatorTool":"Adobe Lightroom 14.2"`)
+		assert.Equal(t, "Adobe Photoshop 24.0", data.Software)
 	})
 }

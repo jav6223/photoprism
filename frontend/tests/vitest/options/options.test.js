@@ -3,7 +3,9 @@ import "../fixtures";
 import * as options from "options/options";
 import {
   AccountTypes,
+  AlbumSortOrder,
   Colors,
+  DownloadName,
   Expires,
   FallbackLocale,
   FeedbackCategories,
@@ -18,6 +20,7 @@ import {
   PhotoTypes,
   RetryLimits,
   SetDefaultLocale,
+  SortOrderOptions,
   StartPages,
   ThumbSizes,
   Timeouts,
@@ -216,6 +219,26 @@ describe("options/options", () => {
     expect(styles[styles.length - 1].value).not.toContain("low-resolution");
   });
 
+  it("should omit styles that require a map key", () => {
+    const withKey = MapsStyle(false, true);
+    const withoutKey = MapsStyle(false, false);
+    expect(withKey.some((s) => s.sponsor)).toBe(true);
+    expect(withoutKey.some((s) => s.sponsor)).toBe(false);
+    expect(withoutKey.length).toBeLessThan(withKey.length);
+    expect(withoutKey.map((s) => s.value)).toContain("default");
+  });
+
+  it("should list all map styles by default", () => {
+    expect(MapsStyle(false)).toEqual(MapsStyle(false, true));
+    expect(MapsStyle(true)).toEqual(MapsStyle(true, true));
+  });
+
+  it("should keep the experimental style when no map key is available", () => {
+    const styles = MapsStyle(true, false);
+    expect(styles.map((s) => s.value)).toContain("low-resolution");
+    expect(styles.some((s) => s.sponsor)).toBe(false);
+  });
+
   it("should return timeouts", () => {
     expect(Timeouts()[1].value).toBe("high");
   });
@@ -257,5 +280,45 @@ describe("options/options", () => {
   it("should return service account type options", () => {
     expect(AccountTypes()[0].value).toBe("webdav");
     expect(AccountTypes().length).toBe(1);
+  });
+
+  it("should return download name options", () => {
+    const downloadNames = DownloadName();
+    expect(downloadNames).toHaveLength(3);
+    expect(downloadNames[0].value).toBe("file");
+    expect(downloadNames[0].text).toBe("Current Name");
+    expect(downloadNames[1].value).toBe("original");
+    expect(downloadNames[1].text).toBe("Original Name");
+    expect(downloadNames[2].value).toBe("share");
+    expect(downloadNames[2].text).toBe("Share Friendly");
+  });
+
+  it("should return album sort order options", () => {
+    const sortOrders = AlbumSortOrder();
+    expect(sortOrders).toHaveLength(8);
+    expect(sortOrders[0].value).toBe("newest");
+    expect(sortOrders[0].text).toBe("Newest First");
+    expect(sortOrders[1].value).toBe("oldest");
+    expect(sortOrders[1].text).toBe("Oldest First");
+    expect(sortOrders[2].value).toBe("added");
+    expect(sortOrders[3].value).toBe("title");
+    expect(sortOrders[4].value).toBe("name");
+    expect(sortOrders[5].value).toBe("size");
+    expect(sortOrders[6].value).toBe("duration");
+    expect(sortOrders[7].value).toBe("relevance");
+  });
+
+  it("should build sort order options for the requested keys, in order", () => {
+    const opts = SortOrderOptions(["relevance", "newest", "archived"]);
+    expect(opts).toHaveLength(3);
+    expect(opts[0]).toEqual({ value: "relevance", text: "Most Relevant" });
+    expect(opts[1]).toEqual({ value: "newest", text: "Newest First" });
+    expect(opts[2]).toEqual({ value: "archived", text: "Recently Archived" });
+  });
+
+  it("should skip unknown sort order keys", () => {
+    const opts = SortOrderOptions(["newest", "bogus", "similar"]);
+    expect(opts.map((o) => o.value)).toEqual(["newest", "similar"]);
+    expect(opts[1].text).toBe("Visual Similarity");
   });
 });

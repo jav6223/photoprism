@@ -108,11 +108,22 @@ func TestFilesByUID(t *testing.T) {
 		}
 		assert.Equal(t, 0, len(files))
 	})
-	//TODO fails on mariadb
-	t.Run("Error", func(t *testing.T) {
-		files, err := FilesByUID([]string{"fs6sg6bw45bnlxxx"}, -100, 0)
-
+	t.Run("InvalidLimit", func(t *testing.T) {
+		_, err := FilesByUID([]string{"fs6sg6bw45bnlxxx"}, -100, 0)
 		assert.Error(t, err)
+	})
+
+	t.Run("Negative limit with offset", func(t *testing.T) {
+		_, err := FilesByUID([]string{"fs6sg6bw45bnlqdw"}, -100, 100)
+		assert.Error(t, err)
+	})
+
+	t.Run("offset and limit", func(t *testing.T) {
+		files, err := FilesByUID([]string{"fs6sg6bw45bnlxxx"}, 10, 100)
+
+		if err != nil {
+			t.Fatal(err)
+		}
 		assert.Equal(t, 0, len(files))
 	})
 }
@@ -148,6 +159,28 @@ func TestVideoByPhotoUID(t *testing.T) {
 
 		assert.Error(t, err, "record not found")
 		t.Log(file)
+	})
+}
+
+func TestDocumentByPhotoUID(t *testing.T) {
+	t.Run("FileFound", func(t *testing.T) {
+		file, err := DocumentByPhotoUID("ps6sg6byk7wrbk48")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		assert.Equal(t, "pdf", file.FileType)
+		assert.Equal(t, "education/university/BSc-Thesis.pdf", file.FileName)
+	})
+	t.Run("NoFileFound", func(t *testing.T) {
+		_, err := DocumentByPhotoUID("111")
+
+		assert.Error(t, err)
+	})
+	t.Run("EmptyUID", func(t *testing.T) {
+		_, err := DocumentByPhotoUID("")
+
+		assert.Error(t, err)
 	})
 }
 
@@ -229,8 +262,8 @@ func TestSetFileError(t *testing.T) {
 
 	SetFileError("fs6sg6bwhhbnlqdn", "errorFromTest")
 
-	//TODO How to assert
-	//assert.Equal(t, true, entity.FileFixturesExampleXMP.FilePrimary)
+	// TODO How to assert
+	// assert.Equal(t, true, entity.FileFixturesExampleXMP.FilePrimary)
 }
 
 func TestRenameFile(t *testing.T) {
@@ -249,8 +282,8 @@ func TestRenameFile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		//TODO how to assert?
-		//assert.Equal(t, "", entity.FileFixturesExampleXMP.FileName)
+		// TODO how to assert?
+		// assert.Equal(t, "", entity.FileFixturesExampleXMP.FileName)
 	})
 
 }

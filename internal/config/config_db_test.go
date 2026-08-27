@@ -1,10 +1,14 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/photoprism/photoprism/pkg/dsn"
 
 	"github.com/photoprism/photoprism/internal/service/cluster"
 )
@@ -26,26 +30,72 @@ func TestConfig_DatabaseDriver(t *testing.T) {
 		c := NewConfig(CliTestContext())
 		resetDatabaseOptions(c)
 
-		assert.Equal(t, SQLite3, c.DatabaseDriver())
+		assert.Equal(t, dsn.DriverSQLite3, c.DatabaseDriver())
 	})
 	t.Run("NormalizesDeprecatedDSN", func(t *testing.T) {
 		c := NewConfig(CliTestContext())
 		resetDatabaseOptions(c)
 
-		c.options.DatabaseDriver = MySQL
+		c.options.DatabaseDriver = dsn.DriverMySQL
 		c.options.Deprecated.DatabaseDsn = "user:pass@tcp(localhost:3306)/photoprism"
 
-		assert.Equal(t, MySQL, c.DatabaseDriver())
+		assert.Equal(t, dsn.DriverMySQL, c.DatabaseDriver())
 		assert.Equal(t, "user:pass@tcp(localhost:3306)/photoprism", c.options.DatabaseDSN)
 		assert.Empty(t, c.options.Deprecated.DatabaseDsn)
 	})
 }
 
 func TestConfig_DatabaseDriverName(t *testing.T) {
-	c := NewConfig(CliTestContext())
-	resetDatabaseOptions(c)
-	driver := c.DatabaseDriverName()
-	assert.Equal(t, "SQLite", driver)
+	t.Run("DefaultsToSQLite", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		assert.Equal(t, "SQLite", c.DatabaseDriverName())
+	})
+	t.Run("Whitespace", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = "   "
+		assert.Equal(t, "SQLite", c.DatabaseDriverName())
+	})
+	t.Run("Auto", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = " AUTO "
+		assert.Equal(t, "SQLite", c.DatabaseDriverName())
+	})
+	t.Run("MySQLReportsAsMariaDB", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = dsn.DriverMySQL
+		assert.Equal(t, "MariaDB", c.DatabaseDriverName())
+	})
+	t.Run("MariaDBAliasReportsAsMariaDB", func(t *testing.T) {
+		// "mariadb" collapses onto DriverMySQL in ParseDriver; format stays "MariaDB".
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = dsn.DriverMariaDB
+		assert.Equal(t, "MariaDB", c.DatabaseDriverName())
+	})
+	t.Run("PostgresReportsAsPostgreSQL", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = dsn.DriverPostgres
+		assert.Equal(t, "PostgreSQL", c.DatabaseDriverName())
+	})
+	t.Run("DeprecatedTiDBReportsAsSQLite", func(t *testing.T) {
+		// DatabaseDriver() warns and rewrites "tidb" to SQLite3 before this runs.
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = "tidb"
+		assert.Equal(t, "SQLite", c.DatabaseDriverName())
+	})
+	t.Run("UnknownDriverReportsAsSQLite", func(t *testing.T) {
+		// DatabaseDriver() coerces unknown drivers to SQLite3 before this runs.
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = "oracle"
+		assert.Equal(t, "SQLite", c.DatabaseDriverName())
+	})
 }
 
 func TestConfig_DatabaseVersion(t *testing.T) {
@@ -58,14 +108,19 @@ func TestConfig_DatabaseVersion(t *testing.T) {
 func TestConfig_DatabaseSsl(t *testing.T) {
 	c := TestConfig()
 
-	assert.False(t, c.DatabaseSsl())
+	// MariaDB enables zero-configuration SSL as of v11.4, other databases don't.
+	if c.DatabaseDriver() == dsn.DriverMySQL && c.IsDatabaseVersion("v11.4") {
+		assert.True(t, c.DatabaseSsl())
+	} else {
+		assert.False(t, c.DatabaseSsl())
+	}
 }
 
 func TestConfig_normalizeDatabaseDSN(t *testing.T) {
 	c := NewConfig(CliTestContext())
 
 	c.options.Deprecated.DatabaseDsn = "foo:b@r@tcp(honeypot:1234)/baz?charset=utf8mb4,utf8&parseTime=true"
-	c.options.DatabaseDriver = MySQL
+	c.options.DatabaseDriver = dsn.DriverMySQL
 
 	assert.Equal(t, "honeypot:1234", c.DatabaseServer())
 	assert.Equal(t, "honeypot", c.DatabaseHost())
@@ -79,7 +134,7 @@ func TestConfig_ParseDatabaseDSN(t *testing.T) {
 	c := NewConfig(CliTestContext())
 
 	c.options.DatabaseDSN = "foo:b@r@tcp(honeypot:1234)/baz?charset=utf8mb4,utf8&parseTime=true"
-	c.options.DatabaseDriver = SQLite3
+	c.options.DatabaseDriver = dsn.DriverSQLite3
 
 	assert.Equal(t, "", c.DatabaseServer())
 	assert.Equal(t, "", c.DatabaseHost())
@@ -88,7 +143,7 @@ func TestConfig_ParseDatabaseDSN(t *testing.T) {
 	assert.Equal(t, "", c.DatabaseUser())
 	assert.Equal(t, "", c.DatabasePassword())
 
-	c.options.DatabaseDriver = MySQL
+	c.options.DatabaseDriver = dsn.DriverMySQL
 
 	assert.Equal(t, "honeypot:1234", c.DatabaseServer())
 	assert.Equal(t, "honeypot", c.DatabaseHost())
@@ -97,7 +152,7 @@ func TestConfig_ParseDatabaseDSN(t *testing.T) {
 	assert.Equal(t, "foo", c.DatabaseUser())
 	assert.Equal(t, "b@r", c.DatabasePassword())
 
-	c.options.DatabaseDriver = SQLite3
+	c.options.DatabaseDriver = dsn.DriverSQLite3
 
 	assert.Equal(t, "", c.DatabaseServer())
 	assert.Equal(t, "", c.DatabaseHost())
@@ -110,7 +165,7 @@ func TestConfig_ParseDatabaseDSN(t *testing.T) {
 		target := NewConfig(CliTestContext())
 		resetDatabaseOptions(target)
 
-		target.options.DatabaseDriver = MySQL
+		target.options.DatabaseDriver = dsn.DriverMySQL
 		target.options.DatabaseServer = "db.internal:3306"
 		target.options.DatabaseName = "photoprism"
 		target.options.DatabaseUser = "app"
@@ -129,7 +184,7 @@ func TestConfig_ParseDatabaseDSN(t *testing.T) {
 		cfg := NewConfig(CliTestContext())
 		resetDatabaseOptions(cfg)
 
-		cfg.options.DatabaseDriver = SQLite3
+		cfg.options.DatabaseDriver = dsn.DriverSQLite3
 		cfg.options.DatabaseDSN = "file:/data/app.db?_busy_timeout=5000"
 		cfg.options.DatabaseServer = "/tmp/mysql.sock"
 		cfg.options.DatabaseName = "existing-name"
@@ -154,15 +209,45 @@ func TestConfig_DatabaseServer(t *testing.T) {
 }
 
 func TestConfig_DatabaseHost(t *testing.T) {
-	c := NewConfig(CliTestContext())
-	resetDatabaseOptions(c)
-	assert.Equal(t, "", c.DatabaseHost())
+	t.Run("SQLite", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		assert.Equal(t, "", c.DatabaseHost())
+	})
+	t.Run("PostgresDefaultsToLocalhost", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = dsn.DriverPostgres
+		assert.Equal(t, "localhost", c.DatabaseHost())
+	})
+	t.Run("PostgresUsesConfiguredHost", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = dsn.DriverPostgres
+		c.options.DatabaseServer = "postgres.internal:5433"
+		assert.Equal(t, "postgres.internal", c.DatabaseHost())
+	})
 }
 
 func TestConfig_DatabasePort(t *testing.T) {
-	c := NewConfig(CliTestContext())
-	resetDatabaseOptions(c)
-	assert.Equal(t, 0, c.DatabasePort())
+	t.Run("SQLite", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		assert.Equal(t, 0, c.DatabasePort())
+	})
+	t.Run("PostgresDefaultsTo5432", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = dsn.DriverPostgres
+		assert.Equal(t, 5432, c.DatabasePort())
+	})
+	t.Run("PostgresUsesConfiguredPort", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		resetDatabaseOptions(c)
+		c.options.DatabaseDriver = dsn.DriverPostgres
+		c.options.DatabaseServer = "postgres.internal:5433"
+		assert.Equal(t, 5433, c.DatabasePort())
+	})
 }
 
 func TestConfig_DatabasePortString(t *testing.T) {
@@ -191,9 +276,9 @@ func TestConfig_DatabasePassword(t *testing.T) {
 	// Test setting the password via secret file.
 	_ = os.Setenv(FlagFileVar("DATABASE_PASSWORD"), "testdata/secret_database")
 	assert.Equal(t, "", c.DatabasePassword())
-	c.Options().DatabaseDriver = MySQL
+	c.Options().DatabaseDriver = dsn.DriverMySQL
 	assert.Equal(t, "StoryOfAmélie", c.DatabasePassword())
-	c.Options().DatabaseDriver = SQLite3
+	c.Options().DatabaseDriver = dsn.DriverSQLite3
 	_ = os.Setenv(FlagFileVar("DATABASE_PASSWORD"), "")
 
 	assert.Equal(t, "", c.DatabasePassword())
@@ -221,19 +306,24 @@ func TestDatabaseProvisionPrefix(t *testing.T) {
 func TestShouldAutoRotateDatabase(t *testing.T) {
 	t.Run("PortalAlwaysFalse", func(t *testing.T) {
 		conf := NewMinimalTestConfig(t.TempDir())
+		resetDatabaseOptions(conf)
 		conf.Options().Edition = Portal
 		conf.Options().NodeRole = cluster.RolePortal
-		conf.Options().DatabaseDriver = MySQL
+		conf.Options().DatabaseDriver = dsn.DriverMySQL
 		assert.False(t, conf.ShouldAutoRotateDatabase())
 	})
 	t.Run("NonMySQLDriverFalse", func(t *testing.T) {
 		conf := NewMinimalTestConfig(t.TempDir())
-		conf.Options().DatabaseDriver = SQLite3
+		resetDatabaseOptions(conf)
+		conf.Options().DatabaseDriver = dsn.DriverSQLite3
 		assert.False(t, conf.ShouldAutoRotateDatabase())
 	})
 	t.Run("MySQLMissingFieldsTrue", func(t *testing.T) {
 		conf := NewMinimalTestConfig(t.TempDir())
-		conf.Options().DatabaseDriver = MySQL
+		// Clear the options first, as credentials are otherwise parsed from the
+		// DSN that the test environment may provide.
+		resetDatabaseOptions(conf)
+		conf.Options().DatabaseDriver = dsn.DriverMySQL
 		conf.Options().DatabaseName = "photoprism"
 		conf.Options().DatabaseUser = ""
 		conf.Options().DatabasePassword = ""
@@ -245,14 +335,14 @@ func TestConfig_DatabaseDSN(t *testing.T) {
 	c := NewConfig(CliTestContext())
 	resetDatabaseOptions(c)
 	driver := c.DatabaseDriver()
-	assert.Equal(t, SQLite3, driver)
+	assert.Equal(t, dsn.DriverSQLite3, driver)
 	c.options.DatabaseDSN = ""
 	c.options.DatabaseDriver = "MariaDB"
 	assert.Equal(t, "photoprism:@tcp(localhost)/photoprism?charset=utf8mb4,utf8&collation=utf8mb4_unicode_ci&parseTime=true&timeout=15s", c.DatabaseDSN())
 	c.options.DatabaseDriver = "tidb"
 	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
 	c.options.DatabaseDriver = "Postgres"
-	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
+	assert.Equal(t, "user=photoprism password= dbname=photoprism host=localhost port=5432 connect_timeout=15 sslmode=disable TimeZone=UTC", c.DatabaseDSN())
 	c.options.DatabaseDriver = "SQLite"
 	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
 	c.options.DatabaseDriver = ""
@@ -262,7 +352,7 @@ func TestConfig_DatabaseDSN(t *testing.T) {
 		conf := NewConfig(CliTestContext())
 		resetDatabaseOptions(conf)
 
-		conf.options.DatabaseDriver = MySQL
+		conf.options.DatabaseDriver = dsn.DriverMySQL
 		conf.options.DatabaseServer = "proxy.internal:6032"
 		conf.options.DatabaseName = "instancedb"
 		conf.options.DatabaseUser = "instance"
@@ -278,7 +368,7 @@ func TestConfig_DatabaseDSN(t *testing.T) {
 		conf := NewConfig(CliTestContext())
 		resetDatabaseOptions(conf)
 
-		conf.options.DatabaseDriver = MySQL
+		conf.options.DatabaseDriver = dsn.DriverMySQL
 		conf.options.DatabaseServer = "/var/run/mysql.sock"
 		conf.options.DatabaseName = "instancedb"
 		conf.options.DatabaseUser = "instance"
@@ -289,6 +379,43 @@ func TestConfig_DatabaseDSN(t *testing.T) {
 		if got := conf.DatabaseDSN(); got != want {
 			t.Fatalf("DatabaseDSN() = %q, want %q", got, want)
 		}
+	})
+	t.Run("PostgresDefaults", func(t *testing.T) {
+		conf := NewConfig(CliTestContext())
+		resetDatabaseOptions(conf)
+
+		conf.options.DatabaseDriver = dsn.DriverPostgres
+		conf.options.DatabaseName = "instancedb"
+		conf.options.DatabaseUser = "instance"
+		conf.options.DatabasePassword = "secret"
+		conf.options.DatabaseTimeout = 12
+
+		want := "user=instance password=secret dbname=instancedb host=localhost port=5432 connect_timeout=12 sslmode=disable TimeZone=UTC"
+		if got := conf.DatabaseDSN(); got != want {
+			t.Fatalf("DatabaseDSN() = %q, want %q", got, want)
+		}
+
+		assert.Equal(t, "localhost", conf.DatabaseHost())
+		assert.Equal(t, 5432, conf.DatabasePort())
+	})
+	t.Run("PostgresCustomServer", func(t *testing.T) {
+		conf := NewConfig(CliTestContext())
+		resetDatabaseOptions(conf)
+
+		conf.options.DatabaseDriver = dsn.DriverPostgres
+		conf.options.DatabaseServer = "postgres.internal:5433"
+		conf.options.DatabaseName = "instancedb"
+		conf.options.DatabaseUser = "instance"
+		conf.options.DatabasePassword = "secret"
+		conf.options.DatabaseTimeout = 9
+
+		want := "user=instance password=secret dbname=instancedb host=postgres.internal port=5433 connect_timeout=9 sslmode=disable TimeZone=UTC"
+		if got := conf.DatabaseDSN(); got != want {
+			t.Fatalf("DatabaseDSN() = %q, want %q", got, want)
+		}
+
+		assert.Equal(t, "postgres.internal", conf.DatabaseHost())
+		assert.Equal(t, 5433, conf.DatabasePort())
 	})
 }
 
@@ -304,7 +431,7 @@ func TestConfig_DatabaseDSNFlags(t *testing.T) {
 		conf := NewConfig(CliTestContext())
 		resetDatabaseOptions(conf)
 
-		conf.options.DatabaseDriver = MySQL
+		conf.options.DatabaseDriver = dsn.DriverMySQL
 		conf.options.Deprecated.DatabaseDsn = "user:pass@tcp(db.internal:3306)/photoprism"
 
 		assert.False(t, conf.NoDatabaseDSN())
@@ -318,10 +445,10 @@ func TestConfig_ReportDatabaseDSN(t *testing.T) {
 	conf := NewConfig(CliTestContext())
 	resetDatabaseOptions(conf)
 
-	assert.Equal(t, SQLite3, conf.DatabaseDriver())
+	assert.Equal(t, dsn.DriverSQLite3, conf.DatabaseDriver())
 	assert.True(t, conf.ReportDatabaseDSN())
 
-	conf.options.DatabaseDriver = MySQL
+	conf.options.DatabaseDriver = dsn.DriverMySQL
 	conf.options.DatabaseDSN = ""
 	assert.False(t, conf.ReportDatabaseDSN())
 
@@ -334,7 +461,7 @@ func TestConfig_DatabaseFile(t *testing.T) {
 	// Ensure SQLite defaults
 	resetDatabaseOptions(c)
 	driver := c.DatabaseDriver()
-	assert.Equal(t, SQLite3, driver)
+	assert.Equal(t, dsn.DriverSQLite3, driver)
 	c.options.DatabaseDSN = ""
 	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db", c.DatabaseFile())
 	assert.Equal(t, ProjectRoot+"/storage/testdata/index.db?_busy_timeout=5000", c.DatabaseDSN())
@@ -375,6 +502,29 @@ func TestConfig_DatabaseConnsIdle(t *testing.T) {
 
 	c.options.DatabaseConnsIdle = 35
 	assert.Equal(t, 28, c.DatabaseConnsIdle())
+}
+
+func TestImportSQL(t *testing.T) {
+	c := NewMinimalTestConfigWithDb("config", t.TempDir())
+
+	// Setup and capture SQL Logging output
+	buffer := bytes.Buffer{}
+	log.SetOutput(&buffer)
+
+	c.ImportSQL("./testdata/importtest.sql")
+
+	// Reset logger
+	log.SetOutput(os.Stdout)
+
+	assert.NotContains(t, buffer.String(), "level=error")
+	assert.True(t, c.db.HasTable("importtest"))
+
+	log.SetOutput(&buffer)
+	c.ImportSQL("./testdata/importtest.sql")
+	// Reset logger
+	log.SetOutput(os.Stdout)
+	assert.Contains(t, buffer.String(), "level=error")
+	require.NoError(t, c.db.DropTableIfExists("importtest").Error)
 }
 
 func TestConfig_checkDb(t *testing.T) {

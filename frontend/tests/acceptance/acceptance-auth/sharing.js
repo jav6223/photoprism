@@ -128,12 +128,12 @@ test.meta("testID", "sharing-001").meta({ mode: "auth" })("Common: Create, view,
   await t.navigateTo("http://localhost:2343/s/secretfortesting");
 
   await t
-    .expect(toolbar.toolbarSecondTitle.withText("Christmas").visible)
-    .notOk()
-    .expect(toolbar.toolbarSecondTitle.withText("Albums").visible)
-    .notOk()
     .expect(Selector(".input-username input").visible)
-    .ok();
+    .ok()
+    .expect(toolbar.toolbarSecondTitle.withText("Christmas").exists)
+    .notOk()
+    .expect(toolbar.toolbarSecondTitle.withText("Albums").exists)
+    .notOk();
 });
 
 test.meta("testID", "sharing-002").meta({ type: "short", mode: "auth" })("Multi-Window: Verify visitor role has limited permissions", async (t) => {
@@ -199,33 +199,42 @@ test.meta("testID", "sharing-002").meta({ type: "short", mode: "auth" })("Multi-
 });
 
 test.meta("testID", "sharing-003").meta({ type: "short", mode: "auth" })("Common: Lightbox sidebar shows only restricted metadata on share links", async (t) => {
-  // Reuse the shared album exposed by sharing-002. The Vitest role x
-  // field matrix already covers the per-role logic against a mocked
-  // $session; this test pins the real anonymous path end-to-end.
   await t.useRole(Role.anonymous());
-  await t.navigateTo("http://localhost:2343/s/jxoux5ub1e/british-columbia-canada");
-  await t.expect(toolbar.toolbarSecondTitle.withText("British Columbia").visible).ok();
+  await t.navigateTo("http://localhost:2343/s/2t6124pb6d/holiday");
+  await t.expect(toolbar.toolbarSecondTitle.withText("Holiday").visible).ok();
 
-  await photoviewer.openPhotoViewer("nth", 0);
-  await photoviewer.openInfoSidebar();
+  // The album's fully-populated photo, so every "must not be visible" assertion below has real
+  // data to withhold. Anchored by title: editions differ in both UID and photo order.
+  await photoviewer.openPhotoViewerByTitle("Albums / 2015");
+  await photoviewer.openSidebar();
 
-  // Allow-list: file info and taken-at rows render for anonymous
-  // viewers so they can tell what they are looking at.
-  await t.expect(photoviewer.sidebarRow("mdi-calendar").exists).ok();
-
-  // Deny-list: edit affordances, face-marker controls, and every
-  // restricted section must be gone.
-  await t.expect(photoviewer.inlinePencils.exists).notOk();
-  await t.expect(photoviewer.markersVisibilityToggle.exists).notOk();
-  await t.expect(photoviewer.markerAddButton.exists).notOk();
-  await t.expect(Selector(".p-sidebar-info .metadata__file").exists).notOk();
-  await t.expect(photoviewer.sidebarRow("mdi-camera").exists).notOk();
-  await t.expect(photoviewer.sidebarRow("mdi-camera-iris").exists).notOk();
-  await t.expect(Selector(".p-sidebar-info .text-subtitle-2").withText("People").exists).notOk();
-  await t.expect(Selector(".p-sidebar-info .text-subtitle-2").withText("Labels").exists).notOk();
-  await t.expect(Selector(".p-sidebar-info .text-subtitle-2").withText("Albums").exists).notOk();
-  await t.expect(Selector(".p-sidebar-info .text-subtitle-2").withText("Keywords").exists).notOk();
-  await t.expect(Selector(".p-sidebar-info .text-subtitle-2").withText("Notes").exists).notOk();
+  // Visitors hold view access on photos and places but not access_library, so the EXIF fields,
+  // the details cluster, People and Labels are all withheld.
+  const hidden = { visible: false };
+  await photoviewer.assertSidebarRows({
+    title: { value: "Albums / 2015", editable: false },
+    caption: { value: "Cute tabby cat on the floor.", editable: false },
+    // The file row renders, but the filename subtitle is suppressed. Each segment is asserted
+    // separately so a change to how they are joined fails on the joiner, not on every value.
+    file: { value: ["JPEG", "3264 × 2448", "2.6 MB"] },
+    filename: hidden,
+    taken: { value: "Dec 25, 2015", editable: false },
+    camera: hidden,
+    lens: hidden,
+    location: { value: ["Neukirchen, Hessen, Germany", "50.8713°N", "9.3460°E"], editable: false },
+    map: {},
+    people: hidden,
+    // Albums is withheld too: the visitor grant carries view but not search.
+    albums: hidden,
+    labels: hidden,
+    subject: hidden,
+    copyright: hidden,
+    artist: hidden,
+    license: hidden,
+    keywords: hidden,
+    notes: hidden,
+  });
+  await t.expect(photoviewer.sidebarAddPrompts.exists).notOk();
 
   await photoviewer.triggerPhotoViewerAction("close-button");
 });

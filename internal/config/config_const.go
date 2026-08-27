@@ -27,6 +27,12 @@ const CustomStaticUri = "/c/static"
 // ThemeUri defines the optional theme URI path for serving theme assets.
 const ThemeUri = "/_theme"
 
+// IndexWorkersAuto is the sentinel value of the index-workers option that
+// asks IndexWorkers() to derive the worker count from the available CPU
+// cores and database driver. Operators can keep "auto" or set a positive
+// numeric string to pin the worker count explicitly.
+const IndexWorkersAuto = "auto"
+
 // DefaultIndexSchedule defines the default indexing schedule in cron format.
 const DefaultIndexSchedule = "" // e.g. "0 */3 * * *" for every 3 hours
 
@@ -70,6 +76,19 @@ const DefaultResolutionLimit = 150 // 150 Megapixels
 
 // serialName defines the name of the unique storage serial.
 const serialName = "serial"
+
+// serialPrefix is the UID prefix of the storage serial, used to validate the value read from disk so
+// a truncated or corrupted file is rejected instead of silently becoming the serial.
+const serialPrefix = 'z'
+
+// PreviewTokenPlaceholder is reported in place of the preview token when none could be derived. It is
+// never registered as a valid token, so previews fail closed rather than accepting a guessable value.
+const PreviewTokenPlaceholder = "********"
+
+// signingKeyName defines the name of the secret file (under KeysPath) holding the HMAC key that signs
+// the app's URL tokens (downloads today, previews next); one shared key signs every token kind. It is
+// regenerated automatically when missing, so it is not backed up.
+const signingKeyName = "signing.key"
 
 // DefaultSessionMaxAge defines the standard session expiration time in seconds.
 const DefaultSessionMaxAge = unix.Week * 2

@@ -7,6 +7,7 @@ import (
 	"github.com/photoprism/photoprism/internal/ffmpeg/encode"
 	"github.com/photoprism/photoprism/internal/thumb"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/media/video"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
@@ -45,7 +46,7 @@ func (c *Config) FFmpegEncoder() encode.Encoder {
 	return encode.FindEncoder(c.options.FFmpegEncoder)
 }
 
-// FFmpegSize returns the maximum ffmpeg video encoding size in pixels (720-7680).
+// FFmpegSize returns the maximum ffmpeg video encoding size in pixels (720-15360).
 func (c *Config) FFmpegSize() int {
 	return thumb.VideoSize(c.options.FFmpegSize).Width
 }
@@ -79,6 +80,21 @@ func (c *Config) FFmpegBitrate() int {
 		return encode.MaxBitrateLimit
 	default:
 		return c.options.FFmpegBitrate
+	}
+}
+
+// FFmpegFisheyeFov returns the clamped field of view in degrees for the v360 dewarp filter.
+// Cameras recognized by entity.CameraFisheyeFov use their own angle instead of this value.
+func (c *Config) FFmpegFisheyeFov() int {
+	switch {
+	case c.options.FFmpegFisheyeFov <= 0:
+		return encode.DefaultFisheyeFov
+	case c.options.FFmpegFisheyeFov < encode.MinFisheyeFov:
+		return encode.MinFisheyeFov
+	case c.options.FFmpegFisheyeFov > encode.MaxFisheyeFov:
+		return encode.MaxFisheyeFov
+	default:
+		return c.options.FFmpegFisheyeFov
 	}
 }
 
@@ -133,6 +149,13 @@ func (c *Config) FFmpegMapAudio() string {
 	}
 
 	return c.options.FFmpegMapAudio
+}
+
+// FFmpegExclude returns a comma-separated list of container and codec names
+// that must not be processed by FFmpeg, e.g. for transcoding, remuxing, or
+// still-frame extraction. Matching is case-insensitive.
+func (c *Config) FFmpegExclude() video.Formats {
+	return video.NewFormats(c.options.FFmpegExclude)
 }
 
 // FFmpegOptions returns the FFmpeg options to use for video transcoding.

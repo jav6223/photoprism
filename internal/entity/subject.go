@@ -11,6 +11,7 @@ import (
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
@@ -176,10 +177,10 @@ func (m *Subject) Restore() error {
 
 		log.Infof("subject: restoring %s %s", TypeString(m.SubjType), clean.Log(m.SubjName))
 
-		event.EntitiesCreated("subjects", []*Subject{m})
+		event.EntitiesCreated("subjects", []string{m.SubjUID})
 
 		if m.IsPerson() {
-			event.EntitiesCreated("people", []*Person{m.Person()})
+			event.EntitiesCreated("people", []string{m.SubjUID})
 			event.Publish("count.people", event.Data{
 				"count": 1,
 			})
@@ -214,10 +215,10 @@ func FirstOrCreateSubject(m *Subject) *Subject {
 	} else if err := m.Create(); err == nil {
 		log.Infof("subject: added %s %s", TypeString(m.SubjType), clean.Log(m.SubjName))
 
-		event.EntitiesCreated("subjects", []*Subject{m})
+		event.EntitiesCreated("subjects", []string{m.SubjUID})
 
 		if m.IsPerson() {
-			event.EntitiesCreated("people", []*Person{m.Person()})
+			event.EntitiesCreated("people", []string{m.SubjUID})
 			event.Publish("count.people", event.Data{
 				"count": 1,
 			})
@@ -396,10 +397,10 @@ func (m *Subject) SaveForm(frm *form.Subject) (changed bool, err error) {
 		}
 
 		if updateErr := m.Updates(values); updateErr == nil {
-			event.EntitiesUpdated("subjects", []*Subject{m})
+			event.EntitiesUpdated("subjects", []string{m.SubjUID})
 
 			if m.IsPerson() {
-				event.EntitiesUpdated("people", []*Person{m.Person()})
+				event.EntitiesUpdated("people", []string{m.SubjUID})
 			}
 
 			return true, nil
@@ -453,13 +454,37 @@ func (m *Subject) UpdateName(name string) (*Subject, error) {
 	// Log result.
 	log.Infof("subject: renamed %s to %s", TypeString(m.SubjType), clean.Log(m.SubjName))
 
-	event.EntitiesUpdated("subjects", []*Subject{m})
+	event.EntitiesUpdated("subjects", []string{m.SubjUID})
 
 	if m.IsPerson() {
-		event.EntitiesUpdated("people", []*Person{m.Person()})
+		event.EntitiesUpdated("people", []string{m.SubjUID})
 	}
 
 	return m, m.UpdateMarkerNames()
+}
+
+// ReassignSubject returns the person that already owns the given name when that is
+// someone other than subj, so callers can link to them instead of renaming subj.
+// A deleted record is not returned: UpdateName clears those out of the way and
+// renames instead.
+func ReassignSubject(subj *Subject, name string) *Subject {
+	if subj == nil {
+		return nil
+	}
+
+	name = clean.Name(name)
+
+	if name == "" || name == subj.SubjName {
+		return nil
+	}
+
+	existing := FindSubjectByName(name, false)
+
+	if existing == nil || existing.Deleted() || existing.SubjUID == subj.SubjUID {
+		return nil
+	}
+
+	return existing
 }
 
 // UpdateMarkerNames updates related marker names.
@@ -490,7 +515,7 @@ func (m *Subject) RefreshPhotos() error {
 
 	var err error
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DriverMySQL:
 		update := fmt.Sprintf(`UPDATE photos p JOIN files f ON f.photo_id = p.id JOIN %s m ON m.file_uid = f.file_uid
 			SET p.checked_at = NULL WHERE m.subj_uid = ?`, Marker{}.TableName())
 		err = UnscopedDb().Exec(update, m.SubjUID).Error

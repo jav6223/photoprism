@@ -20,6 +20,201 @@ import (
 
 const shortTestJoinToken = "short-token"
 
+func TestConfig_ClusterAllowGroups(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		assert.Nil(t, c.ClusterAllowGroups())
+	})
+	t.Run("NormalizesAndSplits", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.ClusterAllowGroups = []string{"Media-Acme-Admin, Media-Acme-Viewer", "media-acme-admin"}
+		assert.Equal(t, []string{"media-acme-admin", "media-acme-viewer"}, c.ClusterAllowGroups())
+	})
+	t.Run("IncludesRoleMapKeys", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.ClusterAllowGroupRoles = []string{"Media-Acme-Admin=admin"}
+		assert.Equal(t, []string{"media-acme-admin"}, c.ClusterAllowGroups(),
+			"a role mapping alone must admit its groups")
+	})
+}
+
+func TestConfig_ClusterAllowGroupRoles(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		assert.Nil(t, c.ClusterAllowGroupRoles())
+	})
+	t.Run("AcceptsAllInstanceRoles", func(t *testing.T) {
+		// Roles must validate independently of the registered edition role
+		// table, since this is read during early bootstrap before activation.
+		c := NewConfig(CliTestContext())
+		c.options.ClusterAllowGroupRoles = []string{
+			"g-admin=admin", "g-manager=manager", "g-user=user",
+			"g-contributor=contributor", "g-viewer:viewer", "g-guest=guest",
+		}
+		assert.Equal(t, map[string]string{
+			"g-admin": "admin", "g-manager": "manager", "g-user": "user",
+			"g-contributor": "contributor", "g-viewer": "viewer", "g-guest": "guest",
+		}, c.ClusterAllowGroupRoles())
+	})
+	t.Run("ToleratesWhitespaceSeparatedPairs", func(t *testing.T) {
+		// A StringSlice env splits on commas, so a space-separated value arrives
+		// as a single element; it must still resolve to all its pairs.
+		c := NewConfig(CliTestContext())
+		c.options.ClusterAllowGroupRoles = []string{"g-admin=admin g-viewer=viewer"}
+		assert.Equal(t, map[string]string{"g-admin": "admin", "g-viewer": "viewer"}, c.ClusterAllowGroupRoles())
+	})
+	t.Run("DropsInvalidEntries", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.ClusterAllowGroupRoles = []string{"a=cluster_admin", "b=visitor", "c=bogus", "=admin", "noseparator", ""}
+		assert.Nil(t, c.ClusterAllowGroupRoles(), "non-instance roles and malformed pairs must be dropped")
+	})
+}
+
+func TestConfig_ClusterGroupsFullView(t *testing.T) {
+	c := NewConfig(CliTestContext())
+	assert.False(t, c.ClusterGroupsFullView())
+	c.options.ClusterGroupsFullView = true
+	assert.True(t, c.ClusterGroupsFullView())
+}
+
+func TestSplitGroupList(t *testing.T) {
+	assert.Equal(t, []string{"a", "b", "c"}, splitGroupList("a,b c"))
+	assert.Empty(t, splitGroupList("  ,  "))
+}
+
+func TestReportGroupRoles(t *testing.T) {
+	assert.Equal(t, "", reportGroupRoles(nil))
+	assert.Equal(t, "a=admin, b=guest", reportGroupRoles(map[string]string{"b": "guest", "a": "admin"}))
+}
+
+func TestConfig_PortalLoginUrl(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		assert.Equal(t, "", c.PortalLoginUrl())
+	})
+	t.Run("SetterValidates", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.SetPortalLoginUrl("  https://portal.example.com/portal/login  ")
+		assert.Equal(t, "https://portal.example.com/portal/login", c.PortalLoginUrl())
+		c.SetPortalLoginUrl("http://127.0.0.1:2342/portal/login")
+		assert.Equal(t, "http://127.0.0.1:2342/portal/login", c.PortalLoginUrl(), "http loopback must be allowed")
+		c.SetPortalLoginUrl("http://portal.example.com/portal/login")
+		assert.Equal(t, "http://127.0.0.1:2342/portal/login", c.PortalLoginUrl(), "http non-loopback must be rejected")
+		c.SetPortalLoginUrl("ftp://portal.example.com/login")
+		assert.Equal(t, "http://127.0.0.1:2342/portal/login", c.PortalLoginUrl(), "unsupported schemes must be rejected")
+		c.SetPortalLoginUrl("")
+		assert.Equal(t, "", c.PortalLoginUrl(), "an empty value must clear the URL")
+	})
+	t.Run("GetterRejectsStoredInvalidValues", func(t *testing.T) {
+		// Values can bypass the setter (env, flag, hand-edited options.yml, or a
+		// stale persisted entry) — the getter must never hand them to the browser.
+		c := NewConfig(CliTestContext())
+		for _, v := range []string{"javascript:alert(1)", "http://portal.example.com/login", "://nope", "ftp://x/login"} {
+			c.options.PortalLoginUrl = v
+			assert.Equal(t, "", c.PortalLoginUrl(), "stored value %q must be rejected on read", v)
+		}
+		c.options.PortalLoginUrl = "https://portal.example.com/portal/login"
+		assert.Equal(t, "https://portal.example.com/portal/login", c.PortalLoginUrl())
+	})
+}
+
+func TestValidClusterURL(t *testing.T) {
+	t.Run("Valid", func(t *testing.T) {
+		for _, v := range []string{"", "https://portal.example.com/login", "http://127.0.0.1:2342/login", "http://localhost/login"} {
+			_, ok := validClusterURL(v)
+			assert.True(t, ok, "%q must be valid", v)
+		}
+	})
+	t.Run("Invalid", func(t *testing.T) {
+		for _, v := range []string{"http://portal.example.com/login", "javascript:alert(1)", "://nope", "/relative/login"} {
+			_, ok := validClusterURL(v)
+			assert.False(t, ok, "%q must be invalid", v)
+		}
+	})
+	t.Run("Trims", func(t *testing.T) {
+		v, ok := validClusterURL("  https://a.example.com/  ")
+		assert.True(t, ok)
+		assert.Equal(t, "https://a.example.com/", v)
+	})
+}
+
+func TestConfig_PortalOIDCIssuer(t *testing.T) {
+	t.Run("DefaultsToSiteUrl", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		assert.Equal(t, c.SiteUrl(), c.PortalOIDCIssuer())
+	})
+	t.Run("FollowsSiteUrlOverride", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.SiteUrl = "https://portal.example.com/"
+		assert.Equal(t, "https://portal.example.com/", c.PortalOIDCIssuer())
+	})
+	t.Run("ExplicitOverrideWins", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.SiteUrl = "https://site.example.com/"
+		c.options.PortalOIDCIssuer = "https://portal-issuer.example.com/"
+		assert.Equal(t, "https://portal-issuer.example.com/", c.PortalOIDCIssuer())
+	})
+}
+
+func TestConfig_PortalOIDCTTL(t *testing.T) {
+	t.Run("DefaultsToFiveMinutes", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCTTL = 0
+		assert.Equal(t, 300*time.Second, c.PortalOIDCTTL())
+	})
+	t.Run("ClampsToMin", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCTTL = 10
+		assert.Equal(t, 60*time.Second, c.PortalOIDCTTL())
+	})
+	t.Run("ClampsToMax", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCTTL = 99999
+		assert.Equal(t, 900*time.Second, c.PortalOIDCTTL())
+	})
+	t.Run("HonorsExplicit", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCTTL = 600
+		assert.Equal(t, 600*time.Second, c.PortalOIDCTTL())
+	})
+}
+
+func TestConfig_PortalOIDCCodeTTL(t *testing.T) {
+	t.Run("DefaultsToSixtySeconds", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCCodeTTL = 0
+		assert.Equal(t, 60*time.Second, c.PortalOIDCCodeTTL())
+	})
+	t.Run("ClampsToMin", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCCodeTTL = 5
+		assert.Equal(t, 30*time.Second, c.PortalOIDCCodeTTL())
+	})
+	t.Run("ClampsToMax", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCCodeTTL = 1000
+		assert.Equal(t, 300*time.Second, c.PortalOIDCCodeTTL())
+	})
+}
+
+func TestConfig_PortalOIDCDefaultPolicyChooser(t *testing.T) {
+	t.Run("DefaultIsChooser", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCDefaultPolicy = ""
+		assert.True(t, c.PortalOIDCDefaultPolicyChooser())
+	})
+	t.Run("Direct", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCDefaultPolicy = "direct"
+		assert.False(t, c.PortalOIDCDefaultPolicyChooser())
+	})
+	t.Run("UnknownValueDefaultsToChooser", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.PortalOIDCDefaultPolicy = "garbage"
+		assert.True(t, c.PortalOIDCDefaultPolicyChooser())
+	})
+}
+
 func TestConfig_PortalUrl(t *testing.T) {
 	t.Run("Unset", func(t *testing.T) {
 		c := NewConfig(CliTestContext())
@@ -225,7 +420,7 @@ func TestConfig_Cluster(t *testing.T) {
 		c.options.JWTScope = "cluster vision"
 		assert.Equal(t, list.ParseAttr("cluster vision"), c.JWTAllowedScopes())
 		c.options.JWTScope = ""
-		assert.Equal(t, list.ParseAttr("config cluster vision metrics mcp"), c.JWTAllowedScopes())
+		assert.Equal(t, list.ParseAttr("config cluster vision metrics mcp users"), c.JWTAllowedScopes())
 	})
 	t.Run("Paths", func(t *testing.T) {
 		c := NewConfig(CliTestContext())

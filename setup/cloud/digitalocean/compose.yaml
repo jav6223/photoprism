@@ -123,9 +123,10 @@ services:
     environment:
       ## !! CHANGE site url if your server has a public domain name e.g. "https://photos.yourdomain.com/" !!
       PHOTOPRISM_SITE_URL: "https://_public_ip_/"
-      PHOTOPRISM_SITE_CAPTION: "AI-Powered Photos App"
-      PHOTOPRISM_SITE_DESCRIPTION: ""                  # meta site description
-      PHOTOPRISM_SITE_AUTHOR: ""                       # meta site author
+      PHOTOPRISM_SITE_NAME: ""                         # short name for identifying this instance within a cluster
+      PHOTOPRISM_SITE_CAPTION: "AI-Powered Photos App"  # short caption or tagline shown alongside the title
+      PHOTOPRISM_SITE_DESCRIPTION: ""                  # longer description shown in SEO and social meta tags
+      PHOTOPRISM_SITE_AUTHOR: ""                       # site owner shown in the author meta tag
       PHOTOPRISM_ADMIN_PASSWORD: "_admin_password_"    # YOUR INITIAL "admin" PASSWORD
       PHOTOPRISM_AUTH_MODE: "password"                 # authentication mode (public, password)
       PHOTOPRISM_HTTP_COMPRESSION: "zstd,gzip"         # improves transfer speed and bandwidth utilization (none, gzip, zstd, or comma-separated list e.g. "zstd,gzip")
@@ -139,7 +140,7 @@ services:
       PHOTOPRISM_DISABLE_MCP: "false"                  # disables Model Context Protocol (MCP) API endpoint for AI agent integrations
       PHOTOPRISM_DISABLE_SETTINGS: "false"             # disables Settings in Web UI
       PHOTOPRISM_DISABLE_TENSORFLOW: "false"           # disables all features depending on TensorFlow
-      PHOTOPRISM_DISABLE_FACES: "false"                # disables face detection and recognition (requires TensorFlow)
+      PHOTOPRISM_DISABLE_FACES: "false"                # disables face detection and recognition
       PHOTOPRISM_DISABLE_CLASSIFICATION: "false"       # disables image classification (requires TensorFlow)
       PHOTOPRISM_DISABLE_VECTORS: "false"              # disables vector graphics support
       PHOTOPRISM_DISABLE_RAW: "false"                  # disables indexing and conversion of RAW images
@@ -147,6 +148,7 @@ services:
       PHOTOPRISM_JPEG_QUALITY: 85                      # a higher value increases the quality and file size of JPEG images and thumbnails (25-100)
       PHOTOPRISM_DETECT_NSFW: "false"                  # automatically flags photos as private that MAY be offensive (requires TensorFlow)
       PHOTOPRISM_UPLOAD_NSFW: "true"                   # allows uploads that MAY be offensive (no effect without TensorFlow)
+      PHOTOPRISM_XMP_FACES: "true"                     # imports face regions and names from XMP metadata as people markers
       PHOTOPRISM_UPLOAD_ALLOW: ""                      # restricts uploads to these file types (comma-separated list of EXTENSIONS; leave blank to allow all)
       PHOTOPRISM_UPLOAD_ARCHIVES: "true"               # allows upload of zip archives (will be extracted before import)
       PHOTOPRISM_UPLOAD_LIMIT: 5000                    # maximum size of uploaded files and uncompressed archive contents in MB
@@ -159,8 +161,8 @@ services:
       ## Run/install on first startup, see https://github.com/photoprism/photoprism/blob/develop/scripts/dist/Makefile:
       PHOTOPRISM_INIT: "https tensorflow"              # common options: update https tensorflow tensorflow-gpu intel gpu davfs yt-dlp
       ## Video Transcoding (https://docs.photoprism.app/getting-started/advanced/transcoding/):
-      # PHOTOPRISM_FFMPEG_ENCODER: "software"          # H.264/AVC encoder (software, intel, nvidia, apple, raspberry, or vaapi)
-      # PHOTOPRISM_FFMPEG_SIZE: "1920"                 # video size limit in pixels (720-7680) (default: 3840)
+      # PHOTOPRISM_FFMPEG_ENCODER: "software"          # H.264/AVC encoder (software, intel, nvidia, apple, raspberry, vaapi, or vulkan)
+      # PHOTOPRISM_FFMPEG_SIZE: "1920"                 # video size limit in pixels (720-15360) (default: 3840)
       # PHOTOPRISM_FFMPEG_BITRATE: "32"                # video bitrate limit in Mbps (default: 60)
     working_dir: "/photoprism" # do not change or remove
     ## Storage Folders: "~" is a shortcut for your home directory, "." for the current directory
@@ -174,7 +176,7 @@ services:
   ## see https://docs.photoprism.app/getting-started/proxies/traefik/
   traefik:
     restart: always
-    image: traefik:v3.6
+    image: traefik:v3.7
     container_name: traefik
     ports:
       - "80:80"
@@ -191,7 +193,7 @@ services:
   ## MariaDB Database Server (recommended)
   ## see https://docs.photoprism.app/getting-started/faq/#should-i-use-sqlite-mariadb-or-mysql
   mariadb:
-    image: mariadb:11
+    image: mariadb:12.3
     container_name: mariadb
     restart: always
     stop_grace_period: 15s

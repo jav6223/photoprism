@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -17,7 +18,9 @@ import (
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
 	"github.com/photoprism/photoprism/pkg/i18n"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/media"
 )
 
@@ -62,6 +65,33 @@ func (ind *Index) Cancel() {
 	mutex.IndexWorker.Cancel()
 }
 
+// storageLow reports whether the storage path is too full to start or continue an index run.
+func (ind *Index) storageLow() bool {
+	_, low, err := ind.conf.StorageLow()
+
+	if err != nil || !low {
+		return false
+	}
+
+	// Do not leak server internals like the size of the storage volume.
+	log.Errorf("index: available storage is below the minimum threshold")
+	event.ErrorMsg(i18n.ErrInsufficientStorage)
+	return true
+}
+
+// abortInsufficientStorage logs the insufficient-storage cause once and cancels the run so the
+// directory walk stops, instead of failing every remaining file with a generic preview error.
+// It is called from worker goroutines when a write leaf reports status.ErrInsufficientStorage.
+func (ind *Index) abortInsufficientStorage() {
+	if mutex.IndexWorker.Canceled() {
+		return
+	}
+
+	log.Errorf("index: available storage is below the minimum threshold")
+	event.ErrorMsg(i18n.ErrInsufficientStorage)
+	ind.Cancel()
+}
+
 // Start indexes media files in the originals folder according to the provided options.
 // It streams work to worker goroutines, updates duplicate caches, and returns both
 // the set of processed paths and the number of files that were changed.
@@ -79,14 +109,34 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 		return found, updated
 	}
 
+	// Checked here rather than per caller, so the API, the CLI and the workers all inherit it.
+	// A marker this run adds is written in the model the migration is moving away from, and the
+	// finalize compares the identity set against a snapshot - a new named marker rolls it back.
+	if held := ind.conf.FacesLocked(); held != "" {
+		log.Infof("index: waiting for the %s to complete", held)
+		return found, updated
+	}
+
 	originalsPath := ind.originalsPath()
-	optionsPath := filepath.Join(originalsPath, o.Path)
+	optionsPath, resolveErr := ResolveIndexPath(originalsPath, o.Path)
+
+	if resolveErr != nil {
+		event.Error(fmt.Sprintf("index: %s", clean.Error(resolveErr)))
+		return found, updated
+	}
 
 	if !fs.PathExists(optionsPath) {
 		event.Error(fmt.Sprintf("index: directory %s not found", clean.Log(optionsPath)))
 		return found, updated
 	} else if fs.DirIsEmpty(originalsPath) {
 		event.InfoMsg(i18n.ErrOriginalsEmpty)
+		return found, updated
+	}
+
+	// Reset the cached disk usage so a freshly freed disk is detected immediately.
+	disk.FlushFree()
+
+	if ind.storageLow() {
 		return found, updated
 	}
 
@@ -134,8 +184,78 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 		log.Infof(`index: ignored "%s"`, fs.RelName(fileName, originalsPath))
 	}
 
+	// enqueueRelated queues unprocessed related files as one indexing job.
+	enqueueRelated := func(mf *MediaFile) {
+		related, relErr := mf.RelatedFiles(ind.conf.Settings().StackSequences())
+
+		if relErr != nil {
+			log.Warnf("index: %s", relErr)
+			return
+		}
+
+		// Main media file is required to proceed.
+		if related.Main == nil {
+			return
+		}
+
+		var files MediaFiles
+		skip := false
+
+		// Check related files.
+		for _, f := range related.Files {
+			if found[f.FileName()].Processed() {
+				// Ignore already processed files.
+				continue
+			} else {
+				fileSize, limitErr := f.ExceedsBytes(o.ByteLimit)
+
+				switch {
+				case fileSize == 0 || ind.files.Indexed(f.RootRelName(), f.Root(), f.ModTime(), o.Rescan):
+					// Flag file as found but not processed.
+					found[f.FileName()] = fs.Found
+					continue
+				case limitErr == nil:
+					// Add to file list.
+					files = append(files, f)
+				case related.Main.FileName() != f.FileName():
+					// Sidecar file is too large, ignore.
+					log.Infof("index: %s", limitErr)
+				default:
+					// Main file is too large, skip all.
+					log.Warnf("index: %s", limitErr)
+					skip = true
+				}
+			}
+
+			found[f.FileName()] = fs.Processed
+		}
+
+		found[mf.FileName()] = fs.Processed
+
+		// Skip if main file is too large or there are no files left to index.
+		if skip || len(files) == 0 {
+			return
+		}
+
+		updated += len(files)
+		related.Files = files
+
+		jobs <- IndexJob{
+			FileName: mf.FileName(),
+			Related:  related,
+			IndexOpt: o,
+			Ind:      ind,
+		}
+	}
+
+	changedXmpMainFiles := make(map[string]struct{})
+
 	err := godirwalk.Walk(optionsPath, &godirwalk.Options{
 		ErrorCallback: func(fileName string, err error) godirwalk.ErrorAction {
+			if errors.Is(err, status.ErrCanceled) || errors.Is(err, status.ErrInsufficientStorage) {
+				return godirwalk.Halt
+			}
+
 			return godirwalk.SkipNode
 		},
 		Callback: func(fileName string, info *godirwalk.Dirent) error {
@@ -146,7 +266,13 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 			}()
 
 			if mutex.IndexWorker.Canceled() {
-				return errors.New("canceled")
+				return status.ErrCanceled
+			}
+
+			// Stop the walk if storage drops below the threshold mid-scan.
+			if ind.storageLow() {
+				ind.Cancel()
+				return status.ErrInsufficientStorage
 			}
 
 			isDir, _ := info.IsDirOrSymlinkToDir()
@@ -176,6 +302,19 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 			}
 
 			found[fileName] = fs.Found
+
+			// Defer changed XMP sidecars until all main files have been visited. On a forced
+			// rescan every main file is reindexed and re-reads its sidecar, so the per-sidecar
+			// stat and main-file lookup are skipped here to avoid redundant work at scale.
+			if fs.FileType(fileName) == fs.SidecarXMP {
+				if !o.Rescan && !ind.files.Indexed(relName, entity.RootOriginals, fs.ModTime(fileName), o.Rescan) {
+					if mainRel := ind.mainForSidecar(relName); mainRel != "" {
+						changedXmpMainFiles[mainRel] = struct{}{}
+					}
+				}
+
+				return nil
+			}
 
 			if !media.MainFile(fileName) {
 				return nil
@@ -222,68 +361,7 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 				log.Warnf("index: %s", err)
 			}
 
-			// Find related files to index.
-			related, err := mf.RelatedFiles(ind.conf.Settings().StackSequences())
-
-			if err != nil {
-				log.Warnf("index: %s", err)
-				return nil
-			}
-
-			var files MediaFiles
-
-			// Main media file is required to proceed.
-			if related.Main == nil {
-				return nil
-			}
-
-			skip := false
-
-			// Check related files.
-			for _, f := range related.Files {
-				if found[f.FileName()].Processed() {
-					// Ignore already processed files.
-					continue
-				} else {
-					fileSize, limitErr := f.ExceedsBytes(o.ByteLimit)
-
-					switch {
-					case fileSize == 0 || ind.files.Indexed(f.RootRelName(), f.Root(), f.ModTime(), o.Rescan):
-						// Flag file as found but not processed.
-						found[f.FileName()] = fs.Found
-						continue
-					case limitErr == nil:
-						// Add to file list.
-						files = append(files, f)
-					case related.Main.FileName() != f.FileName():
-						// Sidecar file is too large, ignore.
-						log.Infof("index: %s", limitErr)
-					default:
-						// Main file is too large, skip all.
-						log.Warnf("index: %s", limitErr)
-						skip = true
-					}
-				}
-
-				found[f.FileName()] = fs.Processed
-			}
-
-			found[fileName] = fs.Processed
-
-			// Skip if main file is too large or there are no files left to index.
-			if skip || len(files) == 0 {
-				return nil
-			}
-
-			updated += len(files)
-			related.Files = files
-
-			jobs <- IndexJob{
-				FileName: mf.FileName(),
-				Related:  related,
-				IndexOpt: o,
-				Ind:      ind,
-			}
+			enqueueRelated(mf)
 
 			return nil
 		},
@@ -291,12 +369,37 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 		FollowSymbolicLinks: true,
 	})
 
+	// Queue sidecar-triggered jobs only after a complete, successful walk.
+	if err == nil && !mutex.IndexWorker.Canceled() {
+		mainFiles := make([]string, 0, len(changedXmpMainFiles))
+
+		for mainRel := range changedXmpMainFiles {
+			mainFiles = append(mainFiles, mainRel)
+		}
+
+		sort.Strings(mainFiles)
+
+		for _, mainRel := range mainFiles {
+			if mutex.IndexWorker.Canceled() {
+				break
+			}
+
+			mainAbs := filepath.Join(originalsPath, mainRel)
+
+			if found[mainAbs].Processed() {
+				continue
+			}
+
+			if mf, mediaErr := NewMediaFile(mainAbs); mediaErr == nil {
+				enqueueRelated(mf)
+			}
+		}
+	}
+
 	close(jobs)
 	wg.Wait()
 
-	if err != nil {
-		log.Error(err.Error())
-	}
+	logWalkResult("index", err)
 
 	if o.Rescan && !o.FacesOnly {
 		if reconciled, reconcileErr := entity.ReconcileOriginalsFolderAlbums(o.Path); reconcileErr != nil {

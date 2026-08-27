@@ -14,6 +14,7 @@ import (
 	"github.com/ulule/deepcopier"
 
 	"github.com/photoprism/photoprism/internal/ai/classify"
+	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/clean"
@@ -23,10 +24,16 @@ import (
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/time/tz"
 	"github.com/photoprism/photoprism/pkg/txt"
+	"github.com/photoprism/photoprism/pkg/txt/clip"
 )
 
 const (
 	PhotoUID = byte('p')
+
+	// UUIDBytes is the byte budget for the photos.uuid column (VARBINARY(255)). A
+	// non-canonical XMP DocumentID adopted as the photo UUID is clipped to it so a long
+	// identifier (e.g. "adobe:docid:photoshop:...") cannot overflow the column.
+	UUIDBytes = 255
 )
 
 var IndexUpdateInterval = 3 * time.Hour           // 3 Hours
@@ -44,7 +51,7 @@ func MapKey(takenAt time.Time, cellId string) string {
 // Photo represents a photo, all its properties, and link to all its images and sidecar files.
 type Photo struct {
 	ID               uint          `gorm:"primary_key" yaml:"-"`
-	UUID             string        `gorm:"type:VARBINARY(64);index;" json:"DocumentID,omitempty" yaml:"DocumentID,omitempty"`
+	UUID             string        `gorm:"type:VARBINARY(255);index;" json:"DocumentID,omitempty" yaml:"DocumentID,omitempty"`
 	TakenAt          time.Time     `gorm:"type:DATETIME;index:idx_photos_taken_uid;" json:"TakenAt" yaml:"TakenAt"`
 	TakenAtLocal     time.Time     `gorm:"type:DATETIME;" json:"TakenAtLocal" yaml:"TakenAtLocal"`
 	TakenSrc         string        `gorm:"type:VARBINARY(8);" json:"TakenSrc" yaml:"TakenSrc,omitempty"`
@@ -806,6 +813,63 @@ func (m *Photo) PreloadMany() *Photo {
 	return m
 }
 
+// RedactForSession trims fields a shared-only session should not see when it accesses a picture
+// through sharing: the album list is limited to the albums shared with the session, and people,
+// labels, the owner, private notes, and identifying metadata (camera serial, the XMP DocumentID,
+// and per-file InstanceID) are removed. Sessions with full library or admin access (and nil
+// sessions) are returned unchanged.
+//
+// It trims only fields the search results omit, so both read paths disclose the same set.
+func (m *Photo) RedactForSession(sess *Session) *Photo {
+	if m == nil || sess == nil {
+		return m
+	}
+
+	// Only sessions limited to shared content are redacted.
+	if !sess.GetUser().HasSharedAccessOnly(acl.ResourcePhotos) && !sess.NotRegistered() {
+		return m
+	}
+
+	// Limit album membership to the albums shared with the session.
+	if len(m.Albums) > 0 {
+		shared := sess.SharedUIDs()
+
+		if len(shared) == 0 {
+			m.Albums = nil
+		} else {
+			allowed := make(map[string]struct{}, len(shared))
+			for _, uid := range shared {
+				allowed[uid] = struct{}{}
+			}
+
+			kept := m.Albums[:0]
+			for _, a := range m.Albums {
+				if _, ok := allowed[a.AlbumUID]; ok {
+					kept = append(kept, a)
+				}
+			}
+
+			m.Albums = kept
+		}
+	}
+
+	// Remove labels and people, plus the per-file XMP InstanceID (marker identity is omitted
+	// defensively in case markers are loaded).
+	m.Labels = nil
+	for i := range m.Files {
+		m.Files[i].RedactForSession(sess)
+	}
+
+	// Remove the owner, private notes, and identifying metadata. PhotoPath and OriginalName stay:
+	// search discloses both to every in-scope session, so withholding them here protects nothing.
+	m.CreatedBy = ""
+	m.UUID = ""
+	m.CameraSerial = ""
+	m.Details = nil
+
+	return m
+}
+
 // NormalizeValues updates the model values with the values from deprecated fields, if any.
 func (m *Photo) NormalizeValues() (normalized bool) {
 	if m.PhotoCaption == "" && m.PhotoDescription != "" {
@@ -1345,8 +1409,20 @@ func (m *Photo) MapKey() string {
 
 // SetCameraSerial updates the camera serial number.
 func (m *Photo) SetCameraSerial(s string) {
-	if s = txt.Clip(s, txt.ClipDefault); m.NoCameraSerial() && s != "" {
+	// camera_serial is VARBINARY(160), so clip by bytes on a rune boundary.
+	if s = clip.Bytes(s, txt.ClipDefault); m.NoCameraSerial() && s != "" {
 		m.CameraSerial = s
+	}
+}
+
+// SetDocumentID adopts an XMP DocumentID as the asset-stable photo UUID, clipping it to
+// the uuid column byte budget on a rune boundary. The strict rnd.IsUUID check is
+// intentionally bypassed (real-world DocumentIDs are often non-canonical), so the clip
+// keeps a long "adobe:docid:photoshop:..." value from overflowing the column. Empty is
+// ignored so it never clears an existing UUID.
+func (m *Photo) SetDocumentID(id string) {
+	if id = clip.Bytes(id, UUIDBytes); id != "" {
+		m.UUID = id
 	}
 }
 

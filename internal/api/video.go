@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/http/header"
+	"github.com/photoprism/photoprism/pkg/i18n"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/media/video"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
@@ -27,7 +30,7 @@ import (
 //	@Produce		video/mp4
 //	@Tags			Files, Videos
 //	@Failure		403		{object}	i18n.Response
-//	@Param			thumb	path		string	true	"SHA1 video file hash"
+//	@Param			hash	path		string	true	"SHA1 video file hash"
 //	@Param			token	path		string	true	"user-specific security token provided with session"
 //	@Param			format	path		string	true	"video format, e.g. mp4"
 //	@Router			/api/v1/videos/{hash}/{token}/{format} [get]
@@ -137,7 +140,8 @@ func GetVideo(router *gin.RouterGroup) {
 		bitrateExceeded := conf.FFmpegEnabled() && conf.FFmpegBitrateExceeded(videoBitrate)
 		transcode := !supported || bitrateExceeded
 
-		if mediaFile, mediaErr := photoprism.NewMediaFile(videoFileName); mediaErr != nil {
+		mediaFile, mediaErr := photoprism.NewMediaFile(videoFileName)
+		if mediaErr != nil {
 			// Set missing flag so that the file doesn't show up in search results anymore.
 			logErr("video", f.Update("FileMissing", true))
 
@@ -145,7 +149,31 @@ func GetVideo(router *gin.RouterGroup) {
 			log.Errorf("video: file %s is missing", clean.Log(f.FileName))
 			AbortVideo(c)
 			return
-		} else if transcode {
+		}
+
+		// Original fisheye pixels must never be sent to the sphere viewer or converted inline in an
+		// HTTP request. Index/import workers create the AVC; an older LRV derivative is a safe fallback.
+		if mediaFile.DewarpableInsv() {
+			playable := photoprism.DewarpedVideoFile(mediaFile)
+
+			if playable == nil {
+				log.Warnf("video: equirectangular derivative for %s is not ready", clean.Log(f.FileName))
+				AbortVideo(c)
+				return
+			}
+
+			mediaFile = playable
+			videoFileName = playable.FileName()
+			videoFileType = playable.FileType()
+			videoContentType = playable.ContentType()
+			info := playable.VideoInfo()
+			videoBitrate = info.VideoBitrate()
+			supported = video.Compatible(videoContentType, format.ContentType)
+			bitrateExceeded = conf.FFmpegEnabled() && conf.FFmpegBitrateExceeded(videoBitrate)
+			transcode = !supported || bitrateExceeded
+		}
+
+		if transcode {
 			if supported && bitrateExceeded {
 				log.Debugf(
 					"video: %s has an average bitrate of %.1f Mbps, which exceeds the %d Mbps limit",
@@ -167,6 +195,10 @@ func GetVideo(router *gin.RouterGroup) {
 			if avcFile, avcErr := conv.ToAvc(mediaFile, get.Config().FFmpegEncoder(), false, false); avcFile != nil && avcErr == nil {
 				videoFileName = avcFile.FileName()
 				AddContentTypeHeader(c, header.ContentTypeMp4AvcMain)
+			} else if errors.Is(avcErr, status.ErrInsufficientStorage) {
+				log.Warnf("video: insufficient storage to transcode %s", clean.Log(f.FileName))
+				Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
+				return
 			} else {
 				// Log error and default to 404.mp4
 				log.Errorf("video: failed to transcode %s", clean.Log(f.FileName))

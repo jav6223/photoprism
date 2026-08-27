@@ -90,12 +90,6 @@ func GetAlbum(router *gin.RouterGroup) {
 		// Get sanitized album UID from request path.
 		uid := clean.UID(c.Param("uid"))
 
-		// Visitors can only access shared content.
-		if (s.NotRegistered()) && !s.HasShare(uid) {
-			AbortForbidden(c)
-			return
-		}
-
 		// Find album by UID.
 		album, err := query.AlbumByUID(uid)
 
@@ -104,9 +98,10 @@ func GetAlbum(router *gin.RouterGroup) {
 			return
 		}
 
-		// Other restricted users can only access their own or shared content.
-		if s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) && album.CreatedBy != s.UserUID && !s.HasShare(uid) {
-			AbortForbidden(c)
+		// Limit access to albums within the session's shared scope; albums outside it are reported
+		// as not found, consistent with how photos and files are read.
+		if !albumViewableBySession(s, album) {
+			AbortAlbumNotFound(c)
 			return
 		}
 
@@ -223,7 +218,7 @@ func UpdateAlbum(router *gin.RouterGroup) {
 		uid := clean.UID(c.Param("uid"))
 
 		// Visitors and other restricted users can only access shared content.
-		if (s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) || s.NotRegistered()) && !s.HasShare(uid) {
+		if albumShareRequired(s, uid) {
 			AbortForbidden(c)
 			return
 		}
@@ -302,7 +297,7 @@ func DeleteAlbum(router *gin.RouterGroup) {
 		uid := clean.UID(c.Param("uid"))
 
 		// Visitors and other restricted users can only access shared content.
-		if (s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) || s.NotRegistered()) && !s.HasShare(uid) {
+		if albumShareRequired(s, uid) {
 			AbortForbidden(c)
 			return
 		}
@@ -381,7 +376,7 @@ func LikeAlbum(router *gin.RouterGroup) {
 		uid := clean.UID(c.Param("uid"))
 
 		// Visitors and other restricted users can only access shared content.
-		if (s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) || s.NotRegistered()) && !s.HasShare(uid) {
+		if albumShareRequired(s, uid) {
 			AbortForbidden(c)
 			return
 		}
@@ -401,7 +396,7 @@ func LikeAlbum(router *gin.RouterGroup) {
 
 		UpdateClientConfig()
 
-		PublishAlbumEvent(StatusUpdated, uid, c)
+		PublishAlbumEvent(StatusUpdated, uid)
 
 		// Update album YAML backup.
 		SaveAlbumYaml(&album)
@@ -432,7 +427,7 @@ func DislikeAlbum(router *gin.RouterGroup) {
 		uid := clean.UID(c.Param("uid"))
 
 		// Visitors and other restricted users can only access shared content.
-		if (s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) || s.NotRegistered()) && !s.HasShare(uid) {
+		if albumShareRequired(s, uid) {
 			AbortForbidden(c)
 			return
 		}
@@ -452,7 +447,7 @@ func DislikeAlbum(router *gin.RouterGroup) {
 
 		UpdateClientConfig()
 
-		PublishAlbumEvent(StatusUpdated, uid, c)
+		PublishAlbumEvent(StatusUpdated, uid)
 
 		// Update album YAML backup.
 		SaveAlbumYaml(&album)
@@ -485,7 +480,7 @@ func CloneAlbums(router *gin.RouterGroup) {
 		uid := clean.UID(c.Param("uid"))
 
 		// Visitors and other restricted users can only access shared content.
-		if (s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) || s.NotRegistered()) && !s.HasShare(uid) {
+		if albumShareRequired(s, uid) {
 			AbortForbidden(c)
 			return
 		}
@@ -536,13 +531,15 @@ func CloneAlbums(router *gin.RouterGroup) {
 		if len(added) > 0 {
 			event.SuccessMsg(i18n.MsgSelectionAddedTo, clean.Log(album.Title()))
 
-			PublishAlbumEvent(StatusUpdated, album.AlbumUID, c)
+			PublishAlbumEvent(StatusUpdated, album.AlbumUID)
 
 			// Update album YAML backup.
 			SaveAlbumYaml(&album)
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": i18n.Msg(i18n.MsgAlbumCloned), "album": album, "added": added})
+		resp := i18n.NewResponse(http.StatusOK, i18n.MsgAlbumCloned)
+
+		c.JSON(http.StatusOK, gin.H{"code": resp.Code, "message": resp.Message, "messageId": resp.MessageID, "messageParams": resp.MessageParams, "album": album, "added": added})
 	})
 }
 
@@ -585,7 +582,7 @@ func AddPhotosToAlbum(router *gin.RouterGroup) {
 		uid := clean.UID(c.Param("uid"))
 
 		// Visitors and other restricted users can only access shared content.
-		if (s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) || s.NotRegistered()) && !s.HasShare(uid) {
+		if albumShareRequired(s, uid) {
 			AbortForbidden(c)
 			return
 		}
@@ -623,7 +620,7 @@ func AddPhotosToAlbum(router *gin.RouterGroup) {
 
 			RemoveFromAlbumCoverCache(album.AlbumUID)
 
-			PublishAlbumEvent(StatusUpdated, album.AlbumUID, c)
+			PublishAlbumEvent(StatusUpdated, album.AlbumUID)
 
 			// Update album YAML backup.
 			SaveAlbumYaml(&album)
@@ -652,12 +649,14 @@ func AddPhotosToAlbum(router *gin.RouterGroup) {
 				if len(approved) > 0 {
 					UpdateClientConfig()
 
-					event.EntitiesUpdated("photos", approved)
+					event.EntitiesUpdated("photos", approved.UIDs())
 				}
 			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": i18n.Msg(i18n.MsgChangesSaved), "album": album, "photos": photos.UIDs(), "added": added})
+		resp := i18n.NewResponse(http.StatusOK, i18n.MsgChangesSaved)
+
+		c.JSON(http.StatusOK, gin.H{"code": resp.Code, "message": resp.Message, "messageId": resp.MessageID, "messageParams": resp.MessageParams, "album": album, "photos": photos.UIDs(), "added": added})
 	})
 }
 
@@ -705,7 +704,7 @@ func RemovePhotosFromAlbum(router *gin.RouterGroup) {
 		uid := clean.UID(c.Param("uid"))
 
 		// Visitors and other restricted users can only access shared content.
-		if (s.GetUser().HasSharedAccessOnly(acl.ResourceAlbums) || s.NotRegistered()) && !s.HasShare(uid) {
+		if albumShareRequired(s, uid) {
 			AbortForbidden(c)
 			return
 		}
@@ -732,12 +731,14 @@ func RemovePhotosFromAlbum(router *gin.RouterGroup) {
 
 			RemoveFromAlbumCoverCache(album.AlbumUID)
 
-			PublishAlbumEvent(StatusUpdated, album.AlbumUID, c)
+			PublishAlbumEvent(StatusUpdated, album.AlbumUID)
 
 			// Update album YAML backup.
 			SaveAlbumYaml(&album)
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": i18n.Msg(i18n.MsgChangesSaved), "album": album, "photos": frm.Photos, "removed": removed})
+		resp := i18n.NewResponse(http.StatusOK, i18n.MsgChangesSaved)
+
+		c.JSON(http.StatusOK, gin.H{"code": resp.Code, "message": resp.Message, "messageId": resp.MessageID, "messageParams": resp.MessageParams, "album": album, "photos": frm.Photos, "removed": removed})
 	})
 }

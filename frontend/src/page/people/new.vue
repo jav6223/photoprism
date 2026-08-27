@@ -48,10 +48,9 @@
                 <v-text-field
                   v-if="m.SubjUID"
                   v-model="m.Name"
-                  :rules="[textRule]"
+                  :rules="rules.text(true, 0, SubjectMaxLength.Name, $gettext('Name'))"
                   :readonly="readonly"
                   autocomplete="off"
-                  hide-details
                   single-line
                   density="comfortable"
                   class="input-name pa-0 ma-0"
@@ -61,11 +60,12 @@
                 <v-combobox
                   v-else
                   v-model:search="m.Name"
-                  :items="$config.values.people"
+                  :items="focused === m.ID ? people : noPeople"
                   item-title="Name"
                   item-value="Name"
                   :readonly="readonly"
                   :menu-props="menuProps"
+                  :menu-icon="null"
                   return-object
                   hide-no-data
                   hide-details
@@ -76,6 +76,7 @@
                   autocomplete="off"
                   density="comfortable"
                   class="input-name pa-0 ma-0 text-selectable"
+                  @focus="() => onFocusName(m)"
                   @update:model-value="(person) => onSetPerson(m, person)"
                   @blur="() => onSetName(m)"
                   @keyup.enter="() => onSetName(m)"
@@ -98,9 +99,13 @@
 <script>
 import Face from "model/face";
 import RestModel from "model/rest";
+import { MaxLength as SubjectMaxLength } from "model/subject";
+import typeaheadCache from "common/typeahead-cache";
+import { rules } from "common/form";
 import { MaxItems } from "common/clipboard";
 import $notify from "common/notify";
 import { ClickLong, ClickShort, Input, InputInvalid } from "common/input";
+import { ACTION_CREATED, ACTION_UPDATED, ACTION_DELETED } from "common/event";
 import PLoading from "component/loading.vue";
 
 export default {
@@ -128,6 +133,12 @@ export default {
     return {
       view: "all",
       config: this.$config.values,
+      people: [],
+      // Stable empty list handed to every combobox that is not being edited.
+      noPeople: [],
+      focused: "",
+      rules,
+      SubjectMaxLength,
       subscriptions: [],
       listen: false,
       dirty: false,
@@ -145,7 +156,6 @@ export default {
       filter: filter,
       lastFilter: {},
       routeName: routeName,
-      titleRule: (v) => v.length <= this.$config.get("clip") || this.$gettext("Name too long"),
       input: new Input(),
       lastId: "",
       menuProps: {
@@ -164,13 +174,6 @@ export default {
         locationStrategy: "connected",
         scrollStrategy: "reposition",
         origin: "auto",
-      },
-      textRule: (v) => {
-        if (!v || !v.length) {
-          return this.$gettext("Name");
-        }
-
-        return v.length <= this.$config.get("clip") || this.$gettext("Text too long");
       },
     };
   },
@@ -199,7 +202,12 @@ export default {
   },
   created() {
     this.search();
+    this.loadPeople();
 
+    // No code currently publishes faces.* events — neither the frontend ($event bus) nor
+    // the backend (and "faces" is not in the WebsocketTopics forward allowlist), so this
+    // subscription is dormant. If wired up, it must emit UID-only payloads and onUpdate's
+    // `updated` branch needs converting to a by-UID refetch (it still assumes a full entity).
     this.subscriptions.push(this.$event.subscribe("faces", (ev, data) => this.onUpdate(ev, data)));
     this.subscriptions.push(this.$event.subscribe("touchmove.top", () => this.refresh()));
   },
@@ -209,6 +217,24 @@ export default {
     }
   },
   methods: {
+    // loadPeople populates the name suggestions from the shared people cache;
+    // a denied or failed fetch leaves the list empty rather than throwing.
+    loadPeople() {
+      return typeaheadCache
+        .getPeople()
+        .then((models) => {
+          this.people = Array.isArray(models) ? models : [];
+        })
+        .catch(() => {});
+    },
+    // onFocusName records which tile is being edited and loads the suggestions.
+    // Only that tile's combobox receives the list, so the item state stays
+    // proportional to the list length instead of list length times tile count.
+    // The id is kept after blur so a menu click cannot empty the list mid-select.
+    onFocusName(model) {
+      this.focused = model?.ID ? model.ID : "";
+      return this.loadPeople();
+    },
     searchCount() {
       return this.batchSize;
     },
@@ -319,7 +345,7 @@ export default {
       const type = ev.split(".")[1];
 
       switch (type) {
-        case "updated":
+        case ACTION_UPDATED:
           for (let i = 0; i < data.entities.length; i++) {
             const values = data.entities[i];
             const model = this.results.find((m) => m.UID === values.UID);
@@ -333,7 +359,7 @@ export default {
             }
           }
           break;
-        case "deleted":
+        case ACTION_DELETED:
           this.dirty = true;
 
           for (let i = 0; i < data.entities.length; i++) {
@@ -348,7 +374,7 @@ export default {
           }
 
           break;
-        case "created":
+        case ACTION_CREATED:
           this.dirty = true;
           break;
         default:
@@ -568,7 +594,9 @@ export default {
         });
     },
     onShow(model) {
-      if (this.busy || !model) return;
+      if (this.busy || !model) {
+        return;
+      }
 
       this.busy = true;
       model.show().finally(() => {
@@ -577,7 +605,9 @@ export default {
       });
     },
     onHide(model) {
-      if (this.busy || !model) return;
+      if (this.busy || !model) {
+        return;
+      }
 
       this.busy = true;
       model.hide().finally(() => {
@@ -586,7 +616,9 @@ export default {
       });
     },
     toggleHidden(model) {
-      if (this.busy || !model) return;
+      if (this.busy || !model) {
+        return;
+      }
 
       this.busy = true;
 
@@ -620,10 +652,10 @@ export default {
         return;
       }
 
-      const people = this.$config.values?.people;
+      const people = this.people;
 
-      if (people) {
-        const found = people.find((person) => person.Name.localeCompare(name, "en", { sensitivity: "base" }) === 0);
+      if (Array.isArray(people)) {
+        const found = people.find((person) => person.Name && person.Name.localeCompare(name, "en", { sensitivity: "base" }) === 0);
         if (found) {
           model.Name = found.Name;
           model.SubjUID = found.UID;
@@ -640,7 +672,8 @@ export default {
       this.setName(model, model.Name);
     },
     setName(model, newName) {
-      if (this.busy || !model || !newName || newName.trim() === "") {
+      const trimmed = (newName || "").trim();
+      if (this.busy || !model || trimmed === "") {
         // Ignore if busy, refuse to save empty name.
         return;
       }
@@ -648,7 +681,9 @@ export default {
       this.busy = true;
       this.$notify.blockUI("busy");
 
-      return model.setName(newName).finally(() => {
+      // Face.setName() seeds the shared people cache, and the name combobox
+      // reloads suggestions on focus, so no explicit refresh is needed here.
+      return model.setName(trimmed).finally(() => {
         this.$notify.unblockUI();
         this.busy = false;
         this.changeFaceCount(-1);

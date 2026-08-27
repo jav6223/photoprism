@@ -57,7 +57,7 @@ func StartImport(router *gin.RouterGroup) {
 		}
 
 		// Abort if there is not enough free storage to import new files.
-		if conf.FilesQuotaReached() {
+		if conf.InsufficientStorage() {
 			event.AuditErr([]string{ClientIP(c), "session %s", "import files", status.InsufficientStorage}, s.RefID)
 			Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
 			return
@@ -162,9 +162,7 @@ func StartImport(router *gin.RouterGroup) {
 		elapsed := int(time.Since(start).Seconds())
 
 		// Show success message.
-		msg := i18n.Msg(i18n.MsgImportCompletedIn, elapsed)
-
-		event.Success(msg)
+		event.SuccessMsg(i18n.MsgImportCompletedIn, elapsed)
 
 		eventData := event.Data{
 			"uid":     opt.UID,
@@ -177,7 +175,7 @@ func StartImport(router *gin.RouterGroup) {
 		event.Publish("index.completed", eventData)
 
 		for _, uid := range frm.Albums {
-			PublishAlbumEvent(StatusUpdated, uid, c)
+			PublishAlbumEvent(StatusUpdated, uid)
 		}
 
 		// Update the user interface.
@@ -188,7 +186,7 @@ func StartImport(router *gin.RouterGroup) {
 			log.Warnf("index: %s (update covers)", err)
 		}
 
-		c.JSON(http.StatusOK, i18n.Response{Code: http.StatusOK, Msg: msg})
+		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgImportCompletedIn, elapsed))
 	})
 }
 

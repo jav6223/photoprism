@@ -6,8 +6,13 @@ import (
 	urlpkg "net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
+	"unicode"
 
+	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	"github.com/photoprism/photoprism/internal/service/cluster/theme"
 	"github.com/photoprism/photoprism/pkg/clean"
@@ -26,7 +31,10 @@ var DefaultPortalUrl = "https://portal.${PHOTOPRISM_CLUSTER_DOMAIN}"
 var DefaultNodeRole = cluster.RoleInstance
 
 // DefaultJWTAllowedScopes lists default OAuth scopes for cluster-issued JWTs.
-var DefaultJWTAllowedScopes = "config cluster vision metrics mcp"
+// Includes "users" so the Portal-side user-management proxy
+// (POST/PUT/DELETE /api/v1/cluster/nodes/{uuid}/users[/{uid}]) and the
+// lifecycle sync push are accepted by the instance JWT scope allowlist.
+var DefaultJWTAllowedScopes = "config cluster vision metrics mcp users"
 
 // SaveClusterOptionsUpdate persists a cluster options update to options.yml,
 // reloads in-memory options, and returns true when values changed.
@@ -44,6 +52,7 @@ func (c *Config) SaveClusterOptionsUpdate(update cluster.OptionsUpdate) (bool, e
 	setOptionString(patch, "ClusterCIDR", update.ClusterCIDR)
 	setOptionString(patch, "NodeClientID", update.NodeClientID)
 	setOptionString(patch, "JWKSUrl", update.JWKSUrl)
+	setOptionString(patch, "PortalLoginUrl", update.PortalLoginUrl)
 	setOptionString(patch, "NodeUUID", update.NodeUUID)
 	setOptionString(patch, "DatabaseDriver", update.DatabaseDriver)
 	setOptionString(patch, "DatabaseDSN", update.DatabaseDSN)
@@ -110,6 +119,174 @@ func (c *Config) ClusterUUID() string {
 // Portal returns true if the configured node type is "portal".
 func (c *Config) Portal() bool {
 	return c.NodeRole() == cluster.RolePortal
+}
+
+// ClusterAllowGroups returns the normalized group identifiers admitted to this
+// instance for Portal cluster admission, including the keys of
+// ClusterAllowGroupRoles so a role mapping alone admits its groups.
+func (c *Config) ClusterAllowGroups() []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(c.options.ClusterAllowGroups))
+
+	add := func(id string) {
+		if n := normalizeGroupID(id); n != "" {
+			if _, dup := seen[n]; !dup {
+				seen[n] = struct{}{}
+				result = append(result, n)
+			}
+		}
+	}
+
+	for _, entry := range c.options.ClusterAllowGroups {
+		for _, id := range splitGroupList(entry) {
+			add(id)
+		}
+	}
+
+	// Role-map keys join the admitted set in sorted order for stable output.
+	roles := c.ClusterAllowGroupRoles()
+	keys := make([]string, 0, len(roles))
+
+	for group := range roles {
+		keys = append(keys, group)
+	}
+
+	sort.Strings(keys)
+
+	for _, group := range keys {
+		add(group)
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
+}
+
+// ClusterAllowGroupRoles maps normalized group identifiers to the instance role
+// granted on Portal cluster admission, from comma- or whitespace-separated
+// GROUP=ROLE pairs. acl.ClusterInstanceRole validation does not depend on the
+// edition role table, so it resolves correctly during early bootstrap too.
+func (c *Config) ClusterAllowGroupRoles() map[string]string {
+	if len(c.options.ClusterAllowGroupRoles) == 0 {
+		return nil
+	}
+
+	result := make(map[string]string, len(c.options.ClusterAllowGroupRoles))
+
+	for _, entry := range c.options.ClusterAllowGroupRoles {
+		for _, pair := range splitGroupList(entry) {
+			group, roleName, ok := parseGroupRolePair(pair)
+
+			if !ok {
+				continue
+			}
+
+			role, valid := acl.ClusterInstanceRole(roleName)
+
+			if !valid {
+				continue
+			}
+
+			result[group] = role.String()
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
+}
+
+// ClusterGroupsFullView reports whether the Portal should send the user's full
+// group set to this instance instead of only the contributing groups.
+func (c *Config) ClusterGroupsFullView() bool {
+	return c.options.ClusterGroupsFullView
+}
+
+// splitGroupList splits a raw option entry into group identifiers, accepting
+// comma- and whitespace-separated lists.
+func splitGroupList(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+}
+
+// parseGroupRolePair splits a single GROUP=ROLE (or GROUP:ROLE) pair, returning
+// the normalized group id and the raw role string. ok is false for a malformed
+// pair (missing separator, empty group, or empty role).
+func parseGroupRolePair(pair string) (group, role string, ok bool) {
+	sep := strings.IndexAny(pair, "=:")
+	if sep < 1 || sep >= len(pair)-1 {
+		return "", "", false
+	}
+	group = normalizeGroupID(pair[:sep])
+	role = strings.TrimSpace(pair[sep+1:])
+	return group, role, group != "" && role != ""
+}
+
+// PortalOIDCIssuer returns the issuer URL advertised by the Portal's OIDC OP
+// (discovery doc, ID tokens, userinfo). Falls back to SiteUrl when the
+// `PHOTOPRISM_PORTAL_OIDC_ISSUER` override is unset.
+func (c *Config) PortalOIDCIssuer() string {
+	if iss := strings.TrimSpace(c.options.PortalOIDCIssuer); iss != "" {
+		return iss
+	}
+	return c.SiteUrl()
+}
+
+// portalOIDCTTLBounds are the configurable lower / upper bounds for the
+// Portal OIDC OP token and code TTLs. Going below the floor would push
+// past the recommended single-request window for an interactive login;
+// going above the ceiling weakens the security posture of the OP.
+const (
+	portalOIDCTTLMin     = 60
+	portalOIDCTTLMax     = 900
+	portalOIDCCodeTTLMin = 30
+	portalOIDCCodeTTLMax = 300
+)
+
+// PortalOIDCTTL returns the configured access-token / ID-token lifetime for
+// the Portal OIDC OP, clamped to a safe range. Defaults to 300 seconds and
+// caps at 900.
+func (c *Config) PortalOIDCTTL() time.Duration {
+	return clampDurationSeconds(c.options.PortalOIDCTTL, portalOIDCTTLMin, portalOIDCTTLMax, 300)
+}
+
+// PortalOIDCCodeTTL returns the authorization-code lifetime for the Portal
+// OIDC OP. Defaults to 60 seconds and caps at 300.
+func (c *Config) PortalOIDCCodeTTL() time.Duration {
+	return clampDurationSeconds(c.options.PortalOIDCCodeTTL, portalOIDCCodeTTLMin, portalOIDCCodeTTLMax, 60)
+}
+
+// PortalOIDCDefaultPolicyChooser reports whether the Portal OIDC OP should
+// route multi-instance logins through the chooser (default), as opposed to
+// `direct` which always honors the requested client_id without prompting.
+func (c *Config) PortalOIDCDefaultPolicyChooser() bool {
+	switch strings.ToLower(strings.TrimSpace(c.options.PortalOIDCDefaultPolicy)) {
+	case "direct":
+		return false
+	default:
+		return true
+	}
+}
+
+// clampDurationSeconds returns the configured value clamped to [min, max].
+// A zero or negative configured value falls back to `def`.
+func clampDurationSeconds(value, minSec, maxSec, defSec int) time.Duration {
+	v := value
+	if v <= 0 {
+		v = defSec
+	}
+	if v < minSec {
+		v = minSec
+	}
+	if v > maxSec {
+		v = maxSec
+	}
+	return time.Duration(v) * time.Second
 }
 
 // PortalUrl returns the URL of the cluster management portal server, if configured.
@@ -204,14 +381,15 @@ func (c *Config) JoinToken() string {
 
 		if fs.FileExistsNotEmpty(fileName) {
 			if b, err := os.ReadFile(fileName); err != nil || len(b) == 0 { //nolint:gosec // path derived from config directory
-				log.Warnf("config: could not read cluster join token from %s (%s)", fileName, err)
+				event.SystemWarn([]string{"config", "cluster join token", "read %s", "%s"}, clean.Log(fileName), clean.Error(err))
 			} else if s := strings.TrimSpace(string(b)); rnd.IsJoinToken(s, false) {
 				if c.cache != nil {
 					c.cache.SetDefault(fileName, s)
 				}
 				return s
 			} else {
-				log.Warnf("config: cluster join token from %s is shorter than %d characters", fileName, rnd.JoinTokenLength)
+				// IsJoinToken checks the format, not only the length, so do not claim the value is too short.
+				event.SystemWarn([]string{"config", "cluster join token", "read %s", "invalid value"}, clean.Log(fileName))
 			}
 		}
 	}
@@ -419,9 +597,9 @@ func (c *Config) NodeClientSecret() string {
 		}
 
 		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			log.Debugf("config: node client secret file %s not found", clean.Log(fileName))
+			event.SystemDebug([]string{"config", "node client secret", "%s", "not found"}, clean.Log(fileName))
 		} else if err != nil {
-			log.Warnf("config: failed to read node client secret from %s (%s)", clean.Log(fileName), err)
+			event.SystemWarn([]string{"config", "node client secret", "read %s", "%s"}, clean.Log(fileName), clean.Error(err))
 		}
 	}
 
@@ -483,41 +661,75 @@ func (c *Config) JWKSUrl() string {
 	return strings.TrimSpace(c.options.JWKSUrl)
 }
 
-// SetJWKSUrl updates the configured JWKS endpoint for portal-issued JWTs.
+// validClusterURL returns the trimmed URL and true when it is an absolute
+// HTTPS URL, or an HTTP URL on a loopback host; an empty input is valid and
+// returns the empty string.
+func validClusterURL(url string) (string, bool) {
+	trimmed := strings.TrimSpace(url)
+	if trimmed == "" {
+		return "", true
+	}
+
+	parsed, err := urlpkg.Parse(trimmed)
+	if err != nil || parsed == nil || parsed.Scheme == "" || parsed.Host == "" {
+		return trimmed, false
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return trimmed, true
+	case "http":
+		return trimmed, dns.IsLoopbackHost(parsed.Hostname())
+	default:
+		return trimmed, false
+	}
+}
+
+// SetJWKSUrl updates the configured JWKS endpoint for portal-issued JWTs
+// (HTTPS, or HTTP for loopback hosts only).
 func (c *Config) SetJWKSUrl(url string) {
 	if c == nil || c.options == nil {
 		return
 	}
 
-	trimmed := strings.TrimSpace(url)
-	if trimmed == "" {
-		c.options.JWKSUrl = ""
-		return
-	}
-
-	parsed, err := urlpkg.Parse(trimmed)
-	if err != nil || parsed == nil || parsed.Scheme == "" || parsed.Host == "" {
-		log.Warnf("config: ignoring JWKS URL %q (%v)", trimmed, err)
-		return
-	}
-
-	scheme := strings.ToLower(parsed.Scheme)
-	host := parsed.Hostname()
-
-	switch scheme {
-	case "https":
-		// Always allowed.
-	case "http":
-		if !dns.IsLoopbackHost(host) {
-			log.Warnf("config: rejecting JWKS URL %q (http only allowed for localhost/loopback)", trimmed)
-			return
-		}
-	default:
-		log.Warnf("config: rejecting JWKS URL %q (unsupported scheme)", trimmed)
+	trimmed, ok := validClusterURL(url)
+	if !ok {
+		log.Warnf("config: rejecting JWKS URL %s (must be https, or http on loopback)", clean.Log(trimmed))
 		return
 	}
 
 	c.options.JWKSUrl = trimmed
+}
+
+// PortalLoginUrl returns the browser-facing Portal login page URL. Nodes
+// persist it from the Portal's register response, which derives it from the
+// Portal's SiteUrl and login route; the frontend uses it to land cluster
+// sign-outs on the Portal login instead of re-initiating the instance OIDC
+// roundtrip with a pinned return_to. Stored values are re-validated on read,
+// so an invalid or stale URL (e.g. from a hand-edited options.yml or env)
+// never becomes a browser redirect target.
+func (c *Config) PortalLoginUrl() string {
+	if v, ok := validClusterURL(c.options.PortalLoginUrl); ok {
+		return v
+	}
+
+	return ""
+}
+
+// SetPortalLoginUrl updates the browser-facing Portal login page URL
+// (HTTPS, or HTTP for loopback hosts only).
+func (c *Config) SetPortalLoginUrl(url string) {
+	if c == nil || c.options == nil {
+		return
+	}
+
+	trimmed, ok := validClusterURL(url)
+	if !ok {
+		log.Warnf("config: rejecting portal login URL %s (must be https, or http on loopback)", clean.Log(trimmed))
+		return
+	}
+
+	c.options.PortalLoginUrl = trimmed
 }
 
 // JWKSCacheTTL returns the JWKS cache lifetime in seconds (default 300, max 3600).

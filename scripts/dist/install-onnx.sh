@@ -2,12 +2,46 @@
 
 set -euo pipefail
 
-ONNX_VERSION=${ONNX_VERSION:-1.25.1}
+# ONNX_DEFAULT_VERSION must match the C API headers vendored by the
+# "github.com/yalue/onnxruntime_go" module, as the binding requests that exact
+# API version and fails to initialize against an older shared library.
+ONNX_DEFAULT_VERSION=1.29.0
+ONNX_VERSION=${ONNX_VERSION:-${ONNX_DEFAULT_VERSION}}
 TODAY=$(date -u +%Y%m%d)
 TMPDIR=${TMPDIR:-/tmp}
 SYSTEM=$(uname -s)
 ARCH=${PHOTOPRISM_ARCH:-$(uname -m)}
-DESTDIR_ARG="${1:-/usr}"
+
+# ONNX_GPU selects a CUDA (GPU) build instead of the default CPU build. It can be
+# set via the ONNX_GPU environment variable or a --gpu[=cuda12|cuda13] argument:
+#   unset / 0 / cpu  -> CPU build (default)
+#   1 / gpu / cuda13 -> CUDA 13 build (recommended; CUDA 12 is deprecated upstream)
+#   cuda12           -> CUDA 12 build (legacy)
+# GPU builds are only published for Linux x64 and additionally require the NVIDIA
+# driver plus a matching CUDA runtime and cuDNN to be present at runtime.
+ONNX_GPU=${ONNX_GPU:-}
+
+# Parse optional flags; the first non-flag argument is the install prefix.
+DESTDIR_ARG="/usr"
+destdir_set=0
+for arg in "$@"; do
+  case "${arg}" in
+    --gpu)    ONNX_GPU="cuda13" ;;
+    --gpu=*)  ONNX_GPU="${arg#--gpu=}" ;;
+    --cpu)    ONNX_GPU="" ;;
+    -*)       echo "Error: unknown option '${arg}'." >&2; exit 2 ;;
+    *)        if [[ "${destdir_set}" == 0 ]]; then DESTDIR_ARG="${arg}"; destdir_set=1; fi ;;
+  esac
+done
+
+# Normalize the GPU selection to an empty (CPU) or "cudaNN" variant.
+gpu_variant=""
+case "${ONNX_GPU,,}" in
+  ""|0|cpu|false|no)    gpu_variant="" ;;
+  1|gpu|cuda13|cuda-13) gpu_variant="cuda13" ;;
+  cuda12|cuda-12)       gpu_variant="cuda12" ;;
+  *) echo "Error: unsupported ONNX_GPU value '${ONNX_GPU}' (use cuda12 or cuda13)." >&2; exit 1 ;;
+esac
 
 if [[ ! -d "${DESTDIR_ARG}" ]]; then
   mkdir -p "${DESTDIR_ARG}"
@@ -22,6 +56,11 @@ fi
 
 mkdir -p "${DESTDIR}" "${TMPDIR}"
 
+# version_lt returns success if $1 is a strictly lower semantic version than $2.
+version_lt() {
+  [[ "$1" != "$2" ]] && [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
+}
+
 archive=""
 sha=""
 
@@ -29,12 +68,30 @@ case "${SYSTEM}" in
   Linux)
     case "${ARCH}" in
       amd64|AMD64|x86_64|x86-64)
-        archive="onnxruntime-linux-x64-${ONNX_VERSION}.tgz"
-        sha="eb566a49cfc49ef0642f809b69340b5bb656c7c4905ba873526d226f2c005816"
+        if [[ -n "${gpu_variant}" ]]; then
+          # Upstream renamed the CUDA-12 archive from "-gpu-" to "-gpu_cuda12-" in v1.27.0.
+          if [[ "${gpu_variant}" == "cuda12" ]] && version_lt "${ONNX_VERSION}" "1.27.0"; then
+            archive="onnxruntime-linux-x64-gpu-${ONNX_VERSION}.tgz"
+          else
+            archive="onnxruntime-linux-x64-gpu_${gpu_variant}-${ONNX_VERSION}.tgz"
+            if [[ "${gpu_variant}" == "cuda13" ]]; then
+              sha="844c64acfc43ab9423215c26493055ea229268e28283146cc644ecef0bdae048"
+            else
+              sha="4ca594a0da83927befbd73fe020d7f569be151d70bb4fe9741ad405f4882e2ad"
+            fi
+          fi
+        else
+          archive="onnxruntime-linux-x64-${ONNX_VERSION}.tgz"
+          sha="c3fddc4f139a045b0c4902c57410f0694f1c2fdf9b6939fbe38b1aeae7cd14ba"
+        fi
         ;;
       arm64|ARM64|aarch64)
+        if [[ -n "${gpu_variant}" ]]; then
+          echo "Error: ONNX Runtime GPU/CUDA builds are only available for Linux x64." >&2
+          exit 1
+        fi
         archive="onnxruntime-linux-aarch64-${ONNX_VERSION}.tgz"
-        sha="daa71b56b00c4ab34798a3d96ca41a32ece4d3e302dc2386d3cca83fd4491214"
+        sha="e1799098ebc054b370f6176a450f158720f297818c613e5dc99b92e2ec82346f"
         ;;
       *)
         echo "Warning: ONNX Runtime is not provided for Linux/${ARCH}; skipping install." >&2
@@ -43,10 +100,14 @@ case "${SYSTEM}" in
     esac
     ;;
   Darwin)
+    if [[ -n "${gpu_variant}" ]]; then
+      echo "Error: ONNX Runtime GPU/CUDA builds are only available for Linux x64." >&2
+      exit 1
+    fi
     case "${ARCH}" in
       arm64|ARM64|aarch64)
         archive="onnxruntime-osx-arm64-${ONNX_VERSION}.tgz"
-        sha="18987ec3187b5f29ba798109750f6135060560ad4e0a52678fcc753ee8fb3091"
+        sha="d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92"
         ;;
       x86_64|x86-64)
         echo "Warning: ONNX Runtime is not provided for macOS/${ARCH} in v${ONNX_VERSION}; skipping install." >&2
@@ -64,6 +125,16 @@ case "${SYSTEM}" in
     ;;
  esac
 
+# The pinned checksums describe the default version only, so drop them for any
+# other release rather than failing later with a misleading mismatch.
+if [[ "${ONNX_VERSION}" != "${ONNX_DEFAULT_VERSION}" ]]; then
+  sha=""
+fi
+
+# Allow an explicit checksum override (e.g. when installing a non-default version
+# or a GPU variant whose checksum is not pinned in this script).
+sha="${ONNX_SHA256:-${sha}}"
+
 verify_sha() {
   local expected="$1"
   local file="$2"
@@ -76,6 +147,11 @@ verify_sha() {
 
 if [[ -z "${archive}" ]]; then
   echo "Could not determine ONNX Runtime archive." >&2
+  exit 1
+fi
+
+if [[ -z "${sha}" ]]; then
+  echo "Error: no checksum pinned for '${archive}'. Set ONNX_SHA256 to install it." >&2
   exit 1
 fi
 
@@ -96,7 +172,7 @@ if [[ ! -f "${package_path}" ]]; then
   echo "Downloading ONNX Runtime ${ONNX_VERSION} (${archive})..."
   if ! curl -fsSL --retry 3 --retry-delay 2 -o "${package_path}" "${primary_url}"; then
     echo "Primary download failed, trying upstream release..."
-    if ! curl -fsSL --retry 3 --retry-delay 2 -o "${package_path}" "${fallback_url}"; then
+    if ! curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors -o "${package_path}" "${fallback_url}"; then
       echo "Failed to download ONNX Runtime archive." >&2
       exit 1
     fi
@@ -110,22 +186,28 @@ echo "Extracting to ${DESTDIR}..."
 tar --overwrite --mode=755 -C "${DESTDIR}" -xzf "${package_path}"
 
 # Normalize layout: copy libraries into ${DESTDIR}/lib and remove extracted tree.
+# The archive extracts to a top directory named after itself (minus ".tgz"),
+# which also covers the GPU builds and their extra provider libraries.
 output_lib_dir="${DESTDIR}/lib"
 mkdir -p "${output_lib_dir}"
 
-for extracted in "${DESTDIR}/onnxruntime-linux-x64-${ONNX_VERSION}" "${DESTDIR}/onnxruntime-linux-aarch64-${ONNX_VERSION}" "${DESTDIR}/onnxruntime-osx-arm64-${ONNX_VERSION}" "${DESTDIR}/onnxruntime-osx-universal2-${ONNX_VERSION}"; do
-  if [[ -d "${extracted}/lib" ]]; then
-    find "${extracted}/lib" -maxdepth 1 -type f -name "libonnxruntime*.so*" -print0 | while IFS= read -r -d '' file; do
-      cp -af "${file}" "${output_lib_dir}/"
-    done
-    # copy any symlinks as well to preserve SONAME links
-    find "${extracted}/lib" -maxdepth 1 -type l -name "libonnxruntime*.so*" -print0 | while IFS= read -r -d '' link; do
-      target=$(readlink "${link}")
-      ln -sf "${target}" "${output_lib_dir}/$(basename "${link}")"
-    done
-    rm -rf "${extracted}"
-  fi
-done
+# Determine the extracted top-level directory from the archive itself: upstream's
+# GPU archive filenames (e.g. "-gpu_cuda13-") do not match their internal
+# directory name (e.g. "-gpu-"), so it cannot be derived from the file name.
+# (|| true: head closes the pipe early, which SIGPIPEs tar under pipefail.)
+extracted_name=$(tar tzf "${package_path}" 2>/dev/null | head -1 | cut -d/ -f1 || true)
+extracted="${DESTDIR}/${extracted_name}"
+if [[ -n "${extracted_name}" && -d "${extracted}/lib" ]]; then
+  find "${extracted}/lib" -maxdepth 1 -type f -name "libonnxruntime*.so*" -print0 | while IFS= read -r -d '' file; do
+    cp -af "${file}" "${output_lib_dir}/"
+  done
+  # copy any symlinks as well to preserve SONAME links
+  find "${extracted}/lib" -maxdepth 1 -type l -name "libonnxruntime*.so*" -print0 | while IFS= read -r -d '' link; do
+    target=$(readlink "${link}")
+    ln -sf "${target}" "${output_lib_dir}/$(basename "${link}")"
+  done
+  rm -rf "${extracted}"
+fi
 
 if [[ "${SYSTEM}" == "Linux" ]]; then
   if [[ "${DESTDIR}" == "/usr" || "${DESTDIR}" == "/usr/local" ]]; then
@@ -135,4 +217,4 @@ if [[ "${SYSTEM}" == "Linux" ]]; then
   fi
 fi
 
-echo "ONNX Runtime ${ONNX_VERSION} installed in '${DESTDIR}'."
+echo "ONNX Runtime ${ONNX_VERSION}${gpu_variant:+ (GPU/${gpu_variant})} installed in '${DESTDIR}'."

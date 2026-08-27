@@ -5,6 +5,7 @@
 *.pid
 *.log
 *.jsonl
+zz_*.go
 *.db
 *.db-journal
 *.sqlite
@@ -28,10 +29,12 @@ __pycache__
 venv
 .venv
 .env*
+!.env.example
 .tmp
 .nv
 .eslintcache
 .gocache
+.gitconfig
 .system
 /pro/
 /portal/
@@ -57,6 +60,7 @@ frontend/coverage/
 /photos/import/*
 /storage/
 /build/
+/setup/Makefile
 /assets/docs/
 /assets/facenet/
 /assets/nasnet/
@@ -74,6 +78,7 @@ frontend/coverage/
 /TODO.md
 join_token
 client_secret
+/i
 
 # Files created automatically by editors and/or operating systems:
 .DS_Store
@@ -88,6 +93,8 @@ Thumbs.db
 .idea
 .codex
 .config
+.mcp.json
+Dockerfile.local*
 .local
 *.local.json
 *.local.yaml
