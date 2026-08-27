@@ -292,6 +292,9 @@ func (c *Config) ConfigureFaceDetector(minScore float64) error {
 			ModelPath:      c.FaceEngineModelPath(),
 			Threads:        c.FaceDetectorThreads(),
 			ScoreThreshold: detectorScoreThreshold(minScore),
+			GPU:            c.FaceGPU(),
+			GPUDeviceID:    c.FaceGPUDevice(),
+			GPUProvider:    c.FaceGPUProvider(),
 		},
 	})
 }
@@ -414,6 +417,27 @@ func (c *Config) FaceOverlap() int {
 	}
 
 	return c.options.FaceOverlap
+}
+
+// FaceGPU returns whether GPU acceleration is enabled for face processing.
+func (c *Config) FaceGPU() bool {
+	return c.options.FaceGPU
+}
+
+// FaceGPUProvider returns the GPU execution provider to use for face processing.
+func (c *Config) FaceGPUProvider() string {
+	if c.options.FaceGPUProvider == "" {
+		return "auto"
+	}
+	return c.options.FaceGPUProvider
+}
+
+// FaceGPUDevice returns the GPU device ID to use for face processing.
+func (c *Config) FaceGPUDevice() int {
+	if c.options.FaceGPUDevice < 0 {
+		return 0
+	}
+	return c.options.FaceGPUDevice
 }
 
 // Face recognition options.
@@ -847,10 +871,13 @@ func (c *Config) ConfigureFaceEmbedder(name face.ModelName) error {
 	model := face.FindEmbeddingModel(name)
 
 	return face.ConfigureEmbedder(face.EmbedderSettings{
-		Name:      name,
-		Model:     model,
-		ModelPath: model.FilePath(c.ModelsPath()),
-		Threads:   c.FaceModelThreads(),
+		Name:        name,
+		Model:       model,
+		ModelPath:   model.FilePath(c.ModelsPath()),
+		Threads:     c.FaceModelThreads(),
+		GPU:         c.FaceGPU(),
+		GPUDeviceID: c.FaceGPUDevice(),
+		GPUProvider: c.FaceGPUProvider(),
 	})
 }
 

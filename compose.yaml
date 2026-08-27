@@ -159,15 +159,16 @@ services:
       CLAUDE_CONFIG_DIR: "${WORKING_DIR:-/go/src/github.com/photoprism/photoprism}/.local/claude"
       GH_REPO: "photoprism/photoprism"
       GH_CONFIG_DIR: "${WORKING_DIR:-/go/src/github.com/photoprism/photoprism}/.local/gh"
-    ## Shared devices for video hardware transcoding (optional):
-    # devices:
-    #  - "/dev/dri:/dev/dri"                         # Required Intel QSV or VAAPI hardware transcoding
-    #  - "/dev/video11:/dev/video11"                 # Video4Linux Video Encode Device (h264_v4l2m2m)
+    ## Shared devices for Intel GPU acceleration (video + AI):
+    devices:
+      - "/dev/dri:/dev/dri"                         # Required for Intel GPU (video transcoding + OpenVINO AI)
     working_dir: "${WORKING_DIR:-/go/src/github.com/photoprism/photoprism}"
     volumes:
       - ".:${WORKING_DIR:-/go/src/github.com/photoprism/photoprism}"
       - "./storage:/photoprism"
       - "go-mod:/go/pkg/mod"
+      ## Mount your Anmol photos folder for auto-import
+      - "../../Anmol:${WORKING_DIR:-/go/src/github.com/photoprism/photoprism}/storage/import/Anmol"
 
   ## Traefik v3 (Reverse Proxy)
   ## includes "*.localssl.dev" SSL certificate for test environments

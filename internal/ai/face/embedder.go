@@ -28,6 +28,10 @@ type EmbedderSettings struct {
 	ModelPath   string
 	Threads     int
 	LibraryPath string
+	// GPU acceleration options
+	GPU         bool   // Enable GPU acceleration
+	GPUDeviceID int    // GPU device ID (default: 0)
+	GPUProvider string // Execution provider: cuda, openvino, directml, tensorrt, auto (default: auto)
 }
 
 var (
