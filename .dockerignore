@@ -15,8 +15,8 @@
 /storage/
 /build/
 /setup/Makefile
-/photoprism
-/photoprism-*
+# /photoprism
+# /photoprism-*
 /frontend/tests/acceptance/screenshots/
 /frontend/tests/screenshots/
 /frontend/tests/*.html
