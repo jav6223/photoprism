@@ -1,0 +1,5 @@
+FROM photoprism/photoprism:latest
+COPY photoprism /opt/photoprism/bin/photoprism
+RUN apt-get update && apt-get install -y wget nvidia-cuda-toolkit && wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz && tar xzf onnxruntime-linux-x64-gpu-1.17.0.tgz && cp onnxruntime-linux-x64-gpu-1.17.0/lib/libonnxruntime.so* /usr/lib/ && cp onnxruntime-linux-x64-gpu-1.17.0/lib/libonnxruntime_providers_cuda.so /usr/lib/ && cp onnxruntime-linux-x64-gpu-1.17.0/lib/libonnxruntime_providers_shared.so /usr/lib/ && ldconfig && rm -rf onnxruntime-linux-x64-gpu-* && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN chmod +x /opt/photoprism/bin/photoprism
+ENV LD_LIBRARY_PATH="/opt/photoprism/lib:/usr/local/lib:/usr/lib"

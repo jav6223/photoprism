@@ -1405,6 +1405,23 @@ var Flags = CliFlags{
 			Usage:   "face embedding thread `COUNT`, derived from the CPU cores when unset",
 			EnvVars: EnvVars("FACE_MODEL_THREADS"),
 		}, DocDefault: "auto"}, {
+		Flag: &cli.BoolFlag{
+			Name:    "face-gpu",
+			Usage:   "enables GPU acceleration for face detection and embedding (requires compatible hardware and ONNX Runtime with GPU support)",
+			EnvVars: EnvVars("FACE_GPU"),
+		}}, {
+		Flag: &cli.StringFlag{
+			Name:    "face-gpu-provider",
+			Usage:   "GPU execution provider `NAME` (auto, cuda, openvino, directml, tensorrt)",
+			Value:   "auto",
+			EnvVars: EnvVars("FACE_GPU_PROVIDER"),
+		}}, {
+		Flag: &cli.IntFlag{
+			Name:    "face-gpu-device",
+			Usage:   "GPU device `ID` to use for face processing",
+			Value:   0,
+			EnvVars: EnvVars("FACE_GPU_DEVICE"),
+		}}, {
 		Flag: &cli.IntFlag{
 			Name:    "face-cluster-size",
 			Usage:   "minimum size of automatically clustered faces in `PIXELS` (20-10000)",

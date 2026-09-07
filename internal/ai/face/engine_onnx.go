@@ -27,6 +27,10 @@ type ONNXOptions struct {
 	Threads        int
 	ScoreThreshold float32
 	NMSThreshold   float32
+	// GPU acceleration options
+	GPU            bool   // Enable GPU acceleration
+	GPUDeviceID    int    // GPU device ID (default: 0)
+	GPUProvider    string // Execution provider: cuda, openvino, directml, tensorrt, auto (default: auto)
 }
 
 const (
@@ -171,6 +175,25 @@ func NewONNXEngine(opts ONNXOptions) (DetectionEngine, error) {
 
 	if err := sessionOpts.SetGraphOptimizationLevel(onnxruntime.GraphOptimizationLevelEnableAll); err != nil {
 		return nil, fmt.Errorf("faces: optimize session graph: %w", err)
+	}
+
+	// Configure GPU acceleration if enabled
+	if opts.GPU {
+		providerType := onnx.ExecutionProviderType(opts.GPUProvider)
+		if opts.GPUProvider == "" {
+			providerType = onnx.ExecutionProviderAuto
+		}
+
+		epConfig := onnx.ExecutionProviderConfig{
+			Type:       providerType,
+			DeviceID:   opts.GPUDeviceID,
+			Enabled:    true,
+			FallbackCPU: true,
+		}
+
+		if err := onnx.ConfigureExecutionProvider(sessionOpts, epConfig); err != nil {
+			log.Warnf("faces: GPU acceleration failed, using CPU: %v", err)
+		}
 	}
 
 	inputInfos, outputInfos, err := onnxruntime.GetInputOutputInfoWithOptions(opts.ModelPath, sessionOpts)

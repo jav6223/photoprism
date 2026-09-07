@@ -90,6 +90,25 @@ func NewONNXEmbedder(settings EmbedderSettings) (Embedder, error) {
 		return nil, fmt.Errorf("faces: optimize session graph: %w", err)
 	}
 
+	// Configure GPU acceleration if enabled
+	if settings.GPU {
+		providerType := onnx.ExecutionProviderType(settings.GPUProvider)
+		if settings.GPUProvider == "" {
+			providerType = onnx.ExecutionProviderAuto
+		}
+
+		epConfig := onnx.ExecutionProviderConfig{
+			Type:       providerType,
+			DeviceID:   settings.GPUDeviceID,
+			Enabled:    true,
+			FallbackCPU: true,
+		}
+
+		if err := onnx.ConfigureExecutionProvider(sessionOpts, epConfig); err != nil {
+			log.Warnf("faces: GPU acceleration failed for embedder, using CPU: %v", err)
+		}
+	}
+
 	graph, err := onnx.Inspect(settings.ModelPath, sessionOpts)
 
 	if err != nil {

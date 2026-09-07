@@ -272,6 +272,9 @@ type Options struct {
 	FaceOverlap               int           `yaml:"-" json:"-" flag:"face-overlap"`
 	FaceModel                 string        `yaml:"FaceModel" json:"-" flag:"face-model"`
 	FaceModelThreads          int           `yaml:"FaceModelThreads" json:"-" flag:"face-model-threads"`
+	FaceGPU                   bool          `yaml:"FaceGPU" json:"-" flag:"face-gpu"`
+	FaceGPUProvider           string        `yaml:"FaceGPUProvider" json:"-" flag:"face-gpu-provider"`
+	FaceGPUDevice             int           `yaml:"FaceGPUDevice" json:"-" flag:"face-gpu-device"`
 	FaceClusterSize           int           `yaml:"-" json:"-" flag:"face-cluster-size"`
 	FaceClusterScore          int           `yaml:"-" json:"-" flag:"face-cluster-score"`
 	FaceClusterCore           int           `yaml:"-" json:"-" flag:"face-cluster-core"`
