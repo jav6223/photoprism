@@ -117,15 +117,9 @@ func detectBestExecutionProvider() ExecutionProviderType {
 
 // appendCUDAExecutionProvider adds NVIDIA CUDA execution provider.
 func appendCUDAExecutionProvider(sessionOpts *onnxruntime.SessionOptions, deviceID int) error {
-	cudaOptions, err := onnxruntime.NewCUDAProviderOptions()
-	if err != nil {
-		return err
-	}
-	defer cudaOptions.Destroy()
-
-	err = cudaOptions.Update(map[string]string{"device_id": fmt.Sprint(deviceID)})
-	if err != nil {
-		return err
+	// Create CUDA provider options
+	cudaOptions := &onnxruntime.CUDAProviderOptions{
+		DeviceID: deviceID,
 	}
 
 	// Try to append CUDA execution provider
@@ -168,15 +162,9 @@ func appendDirectMLExecutionProvider(sessionOpts *onnxruntime.SessionOptions, de
 
 // appendTensorRTExecutionProvider adds NVIDIA TensorRT execution provider.
 func appendTensorRTExecutionProvider(sessionOpts *onnxruntime.SessionOptions, deviceID int) error {
-	tensorRTOptions, err := onnxruntime.NewTensorRTProviderOptions()
-	if err != nil {
-		return err
-	}
-	defer tensorRTOptions.Destroy()
-
-	err = tensorRTOptions.Update(map[string]string{"device_id": fmt.Sprint(deviceID)})
-	if err != nil {
-		return err
+	// Create TensorRT provider options
+	tensorRTOptions := &onnxruntime.TensorRTProviderOptions{
+		DeviceID: deviceID,
 	}
 
 	// Try to append TensorRT execution provider
