@@ -112,7 +112,7 @@ services:
     working_dir: "/photoprism" # do not change or remove
     ## Storage Folders: "~" is a shortcut for your home directory, "." for the current directory
     volumes:
-      - "./originals:/photoprism/originals"    # original media files (photos and videos)
+      - "/run/media/jani/J1/Anmol:/photoprism/originals"
       - "./import:/photoprism/import"          # *optional* folder from which files can be imported to originals
       - "./storage:/photoprism/storage"        # *writable* storage folder for cache, database, and sidecar files (never remove)
 

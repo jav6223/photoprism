@@ -1,6 +1,5 @@
 {
   "permissions": {
-    "additionalDirectories": ["/go", "/tmp", "/home"],
     "allow": [
       "Bash(make:*)",
       "Bash(go:*)",
@@ -11,9 +10,21 @@
       "Grep",
       "Glob",
       "WebSearch",
-      "mcp__playwright__*"
+      "mcp__playwright__*",
+      "Bash(./photoprism config *)",
+      "Bash(docker compose *)",
+      "Bash(chmod +x /media/advsecm1/J/photoprism/photoprism/build_with_gpu.sh)",
+      "Bash(chmod +x /media/advsecm1/J/photoprism/photoprism/create_gpu_fork.sh)",
+      "Bash(docker --version)",
+      "Bash(chmod +x /media/advsecm1/J/PhotoPrism_Portable/optimize_now.sh)"
     ],
-    "defaultMode": "acceptEdits"
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": [
+      "/go",
+      "/tmp",
+      "/home",
+      "/media/advsecm1/J/PhotoPrism_Portable"
+    ]
   },
   "awaySummaryEnabled": false
 }

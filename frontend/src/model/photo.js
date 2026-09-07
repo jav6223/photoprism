@@ -1159,6 +1159,10 @@ export class Photo extends RestModel {
     return $api.post("batch/photos/archive", { photos: [this.getId()] });
   }
 
+  delete() {
+    return $api.post("batch/photos/delete", { photos: [this.getId()] });
+  }
+
   approve() {
     return $api.post(this.getEntityResource() + "/approve");
   }

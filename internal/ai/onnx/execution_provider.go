@@ -6,11 +6,8 @@ import (
 	"runtime"
 
 	onnxruntime "github.com/yalue/onnxruntime_go"
-
-	"github.com/photoprism/photoprism/internal/event"
 )
 
-var log = event.Log
 
 // ExecutionProviderType defines the type of execution provider to use.
 type ExecutionProviderType string

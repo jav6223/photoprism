@@ -127,7 +127,7 @@
           @click.stop="removeFromAlbum"
         ></v-btn>
         <v-btn
-          v-if="canDelete && !album && context === contexts.Archive"
+          v-if="canDelete && context !== contexts.Hidden"
           key="action-delete"
           :title="$gettext('Delete')"
           icon="mdi-delete"

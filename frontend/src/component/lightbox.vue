@@ -269,6 +269,7 @@ export default {
       canLike: this.$config.allow("photos", "manage") && features.favorites,
       canDownload: this.$config.allow("photos", "download") && features.download,
       canArchive: this.$config.allow("photos", "delete") && features.archive,
+      canDelete: this.$config.allow("photos", "delete") && features.delete,
       canManageAlbums: this.$config.allow("albums", "manage"),
       canFullscreen: $fullscreen.isSupported() && (!this.$isMobile || this.$config.featExperimental()), // see https://developer.mozilla.org/en-US/docs/Web/API/Document/fullscreenEnabled
       wasFullscreen: $fullscreen.isEnabled(),
@@ -570,6 +571,7 @@ export default {
       this.canLike = this.$config.allow("photos", "manage") && this.$config.feature("favorites");
       this.canDownload = this.$config.allow("photos", "download") && this.$config.feature("download");
       this.canArchive = this.$config.allow("photos", "delete") && this.$config.feature("archive");
+      this.canDelete = this.$config.allow("photos", "delete") && this.$config.feature("delete");
       this.canManageAlbums = this.$config.allow("albums", "manage");
     },
     // Displays the thumbnail images and/or videos that belong to the specified models in the lightbox.
@@ -1779,6 +1781,21 @@ export default {
           },
         },
         {
+          name: "delete",
+          icon: "mdi-delete",
+          text: this.$gettext("Delete"),
+          disabled: !this.model,
+          visible:
+            this.canDelete &&
+            this.context !== contexts.Hidden &&
+            this.context !== contexts.BatchEdit,
+          click: () => {
+            if (window.confirm(this.$gettext("Are you sure you want to permanently delete this picture?"))) {
+              this.onDelete();
+            }
+          },
+        },
+        {
           name: "download",
           icon: "mdi-download",
           text: this.$gettext("Download"),
@@ -2795,6 +2812,14 @@ export default {
             }
           }
           return true;
+        case "Delete":
+        case "Backspace":
+          if (this.canDelete && this.context !== contexts.Hidden && this.context !== contexts.BatchEdit) {
+            if (window.confirm(this.$gettext("Are you sure you want to permanently delete this picture?"))) {
+              this.onDelete();
+            }
+          }
+          return true;
         case "KeyD":
           if (this.canDownload) {
             this.onDownload();
@@ -3265,6 +3290,24 @@ export default {
       // subscriber in model/photo.js — no manual evictPhoto() here.
       return this.model.archive().then(() => {
         this.$notify.success(this.$gettext("Archived"));
+      });
+    },
+    onDelete() {
+      if (!this.canDelete) {
+        return;
+      }
+
+      this.pauseSlideshow();
+
+      if (!this.model || !this.model.UID) {
+        this.log("viewer: could not delete photo because model UID is unknown");
+        return;
+      }
+
+      // Cache eviction is handled by the photos.deleted WS
+      // subscriber in model/photo.js
+      return this.model.delete().then(() => {
+        this.$notify.success(this.$gettext("Permanently deleted"));
       });
     },
     onRestore() {
