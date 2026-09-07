@@ -182,6 +182,28 @@
           </v-row>
         </v-card-actions>
 
+        <v-card-title class="pb-0 text-subtitle-2">
+          {{ $gettext(`Computer Vision Models`) }}
+        </v-card-title>
+
+        <v-card-actions>
+          <v-row align="start" dense>
+            <v-col v-for="(model, index) in vision.models" :key="index" cols="12" sm="6" lg="3">
+              <v-text-field
+                v-model="model.name"
+                :disabled="isDemo"
+                :label="model.type.toUpperCase()"
+                :hint="`Engine: ${model.engine || 'default'}`"
+                density="compact"
+                color="surface-variant"
+                prepend-inner-icon="mdi-brain"
+                persistent-hint
+                @change="onChange"
+              ></v-text-field>
+            </v-col>
+          </v-row>
+        </v-card-actions>
+
         <template v-if="!settings.DisableBackups">
           <v-card-title class="pb-0 text-subtitle-2">
             {{ $gettext(`Backup`) }}
@@ -444,6 +466,7 @@
 
 <script>
 import ConfigOptions from "model/config-options";
+import VisionConfig from "model/vision-config";
 import * as options from "options/options";
 import { restart } from "common/server";
 import PAboutFooter from "component/about/footer.vue";
@@ -463,6 +486,7 @@ export default {
       config: this.$config.values,
       rtl: this.$isRtl,
       settings: new ConfigOptions(false),
+      vision: new VisionConfig(false),
       options: options,
     };
   },
@@ -488,7 +512,10 @@ export default {
       this.busy = true;
       this.$notify.blockUI("busy");
 
-      this.settings.load().finally(() => {
+      Promise.all([
+        this.settings.load(),
+        this.vision.load()
+      ]).finally(() => {
         this.busy = false;
         this.$notify.unblockUI();
       });
@@ -501,9 +528,10 @@ export default {
       this.busy = true;
       this.$notify.blockUI("busy");
 
-      this.settings
-        .save()
-        .then(() => {
+      Promise.all([
+        this.settings.save(),
+        this.vision.save()
+      ]).then(() => {
           this.$notify.success(this.$gettext("Changes successfully saved"));
         })
         .finally(() => {

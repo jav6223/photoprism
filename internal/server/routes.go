@@ -59,6 +59,8 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 	// Global Configuration.
 	api.GetConfigOptions(APIv1)
 	api.SaveConfigOptions(APIv1)
+	api.GetVisionConfig(APIv1)
+	api.SaveVisionConfig(APIv1)
 	api.StopServer(APIv1)
 
 	// User Settings.
